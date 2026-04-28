@@ -15,7 +15,7 @@ import java.util.concurrent.Callable
 buildscript {
     ext {
         opensearch_version = System.getProperty("opensearch.version", "3.6.0-SNAPSHOT")
-        jvector_version = System.getProperty("jvector.version", "3.6.0.0-SNAPSHOT")
+        jvector_version = System.getProperty("jvector.version", "3.6.0.0")
         buildVersionQualifier = System.getProperty("build.version_qualifier", "")
         isSnapshot = "true" == System.getProperty("build.snapshot", "true")
         isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "false")
