@@ -38,7 +38,7 @@ jobs:
 
       - name: Run tests
         run: |
-          ./gradlew ':integTest' --parallel -Dtest_aggs=true --tests \"org.opensearch.neuralsearch.query.aggregation.*IT\"
+          ./gradlew ':integTest' --parallel -Dtest_aggs=true --tests "org.opensearch.neuralsearch.query.aggregation.*IT"
 
   Check-neural-search-windows:
     strategy:
