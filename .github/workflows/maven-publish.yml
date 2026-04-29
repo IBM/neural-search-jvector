@@ -11,7 +11,7 @@ on:
 jobs:
   build-and-publish-snapshots:
     # No publications at the moment
-    if: false 
+    if: false
     runs-on: ubuntu-latest
 
     permissions:
