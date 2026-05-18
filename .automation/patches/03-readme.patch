@@ -1,0 +1,19 @@
+diff --git a/README.md b/README.md
+index 979a0c5..b66de2a 100644
+--- a/README.md
++++ b/README.md
+@@ -6,9 +6,11 @@
+ [![Chat](https://img.shields.io/badge/chat-on%20forums-blue)](https://forum.opensearch.org)
+ ![PRs welcome!](https://img.shields.io/badge/PRs-welcome!-success)
+ 
+-## OpenSearch Neural Search
+-**OpenSearch Neural Search** is an OpenSearch plugin that adds dense neural retrieval into the OpenSearch ecosystem.
+-The plugin provides the capability for indexing documents and doing neural search on the indexed documents.
++## OpenSearch Neural Search for JVector
++**OpenSearch Neural Search for JVector** is an OpenSearch plugin that adds dense neural retrieval with JVector into the OpenSearch ecosystem.
++The plugin provides the capability for indexing documents and doing neural search on the indexed documents. This repository is a fork of 
++official [Neural Search](https://github.com/opensearch-project/neural-search/) plugin that integrates with [OpenSearch JVector](https://github.com/opensearch-project/opensearch-jvector/)
++as the vector engine.
+ 
+ ## Project Resources
+ 
