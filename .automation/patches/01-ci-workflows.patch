@@ -1,0 +1,220 @@
+diff --git a/.github/workflows/CI.yml b/.github/workflows/CI.yml
+index b51a57c..de37b9b 100644
+--- a/.github/workflows/CI.yml
++++ b/.github/workflows/CI.yml
+@@ -16,13 +16,7 @@ concurrency:
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+ 
+ jobs:
+-  Get-CI-Image-Tag:
+-    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
+-    with:
+-      product: opensearch
+-
+   Check-neural-search-linux:
+-    needs: Get-CI-Image-Tag
+     strategy:
+       matrix:
+         java: [21, 25]
+@@ -34,17 +28,8 @@ jobs:
+ 
+     name: Gradle Check Linux
+     runs-on: ${{ matrix.os }}
+-    container:
+-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+-      # this image tag is subject to change as more dependencies and updates will arrive over time
+-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+-      # need to switch to root so that github actions can install runner binary on container without permission issues.
+-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+ 
+     steps:
+-      - name: Run start commands
+-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+-
+       - uses: actions/checkout@v4
+ 
+       - name: Setup Java ${{ matrix.java }}
+@@ -55,12 +40,11 @@ jobs:
+           cache: 'gradle'
+ 
+       - name: Run build
+-        run: |
+-          chown -R 1000:1000 `pwd`
+-          su `id -un 1000` -c "./gradlew check --parallel -x integTest"
++        run: ./gradlew check --parallel -x integTest
+ 
+       - name: Upload Coverage Report
+-        if: ${{ !cancelled() && contains(matrix.os, 'ubuntu') && contains(matrix.java, '21') }}
++        # No coverage reports
++        if: ${{ false && !cancelled() && contains(matrix.os, 'ubuntu') && contains(matrix.java, '21') }}
+         uses: codecov/codecov-action@v5
+         with:
+           token: ${{ secrets.CODECOV_TOKEN }}
+@@ -91,7 +75,6 @@ jobs:
+           ./gradlew check --parallel -x integTest
+ 
+   Precommit-neural-search-linux:
+-    needs: Get-CI-Image-Tag
+     strategy:
+       matrix:
+         java: [21, 25]
+@@ -99,17 +82,7 @@ jobs:
+ 
+     name: Pre-commit Linux
+     runs-on: ${{ matrix.os }}
+-    container:
+-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+-      # this image tag is subject to change as more dependencies and updates will arrive over time
+-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+-      # need to switch to root so that github actions can install runner binary on container without permission issues.
+-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+-
+     steps:
+-      - name: Run start commands
+-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+-
+       - uses: actions/checkout@v4
+ 
+       - name: Setup Java ${{ matrix.java }}
+@@ -120,9 +93,7 @@ jobs:
+           cache: 'gradle'
+ 
+       - name: Run build
+-        run: |
+-          chown -R 1000:1000 `pwd`
+-          su `id -un 1000` -c "./gradlew precommit -x integTest --parallel"
++        run: ./gradlew precommit -x integTest --parallel
+ 
+   integTest:
+     needs: Precommit-neural-search-linux
+diff --git a/.github/workflows/changelog_verifier.yml b/.github/workflows/changelog_verifier.yml
+index 9c9ae9c..59d01ad 100644
+--- a/.github/workflows/changelog_verifier.yml
++++ b/.github/workflows/changelog_verifier.yml
+@@ -7,6 +7,8 @@ jobs:
+   # Enforces the update of a changelog file on every pull request
+   verify-changelog:
+     runs-on: ubuntu-latest
++    # Not supported at the moment
++    if: false
+     steps:
+       - uses: actions/checkout@v3
+         with:
+diff --git a/.github/workflows/copy-linked-issue-labels.yml b/.github/workflows/copy-linked-issue-labels.yml
+index 47851f3..edd51b9 100644
+--- a/.github/workflows/copy-linked-issue-labels.yml
++++ b/.github/workflows/copy-linked-issue-labels.yml
+@@ -5,7 +5,8 @@ on:
+ 
+ jobs:
+   copy-issue-labels:
+-    if: github.repository == 'opensearch-project/neural-search'
++    # Not supported at the moment
++    if: false && github.repository == 'opensearch-project/neural-search'
+     runs-on: ubuntu-latest
+     permissions:
+       issues: read
+diff --git a/.github/workflows/maven-publish.yml b/.github/workflows/maven-publish.yml
+index c6176e4..1b94744 100644
+--- a/.github/workflows/maven-publish.yml
++++ b/.github/workflows/maven-publish.yml
+@@ -10,6 +10,8 @@ on:
+ 
+ jobs:
+   build-and-publish-snapshots:
++    # No publications at the moment
++    if: false
+     runs-on: ubuntu-latest
+ 
+     permissions:
+diff --git a/.github/workflows/test_aggregations.yml b/.github/workflows/test_aggregations.yml
+index a8995f9..d9a8608 100644
+--- a/.github/workflows/test_aggregations.yml
++++ b/.github/workflows/test_aggregations.yml
+@@ -16,13 +16,7 @@ concurrency:
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+ 
+ jobs:
+-  Get-CI-Image-Tag:
+-    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
+-    with:
+-      product: opensearch
+-
+   Check-neural-search-linux:
+-    needs: Get-CI-Image-Tag
+     strategy:
+       matrix:
+         java: [21, 25]
+@@ -30,18 +24,8 @@ jobs:
+ 
+     name: Integ Tests Linux
+     runs-on: ${{ matrix.os }}
+-    container:
+-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+-      # this image tag is subject to change as more dependencies and updates will arrive over time
+-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+-      # need to switch to root so that github actions can install runner binary on container without permission issues.
+-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+-
+ 
+     steps:
+-      - name: Run start commands
+-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+-
+       - name: Checkout neural-search
+         uses: actions/checkout@v4
+ 
+@@ -54,8 +38,7 @@ jobs:
+ 
+       - name: Run tests
+         run: |
+-          chown -R 1000:1000 `pwd`
+-          su `id -un 1000` -c "./gradlew ':integTest' --parallel -Dtest_aggs=true --tests \"org.opensearch.neuralsearch.query.aggregation.*IT\""
++          ./gradlew ':integTest' --parallel -Dtest_aggs=true --tests "org.opensearch.neuralsearch.query.aggregation.*IT"
+ 
+   Check-neural-search-windows:
+     strategy:
+diff --git a/.github/workflows/test_security.yml b/.github/workflows/test_security.yml
+index 5a8d4d8..0cb4861 100644
+--- a/.github/workflows/test_security.yml
++++ b/.github/workflows/test_security.yml
+@@ -16,11 +16,6 @@ concurrency:
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+ 
+ jobs:
+-  Get-CI-Image-Tag:
+-    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
+-    with:
+-      product: opensearch
+-
+   integ-test-with-security-linux:
+     strategy:
+       matrix:
+@@ -28,18 +23,8 @@ jobs:
+ 
+     name: Run Security Enabled Integration Tests on Linux
+     runs-on: ubuntu-latest
+-    needs: Get-CI-Image-Tag
+-    container:
+-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+-      # this image tag is subject to change as more dependencies and updates will arrive over time
+-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+-      # need to switch to root so that github actions can install runner binary on container without permission issues.
+-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+ 
+     steps:
+-      - name: Run start commands
+-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+-
+       - name: Checkout neural-search
+         uses: actions/checkout@v4
+         with:
+@@ -53,7 +38,5 @@ jobs:
+           cache: 'gradle'
+ 
+       - name: Run tests
+-        # switching the user, as OpenSearch cluster can only be started as root/Administrator on linux-deb/linux-rpm/windows-zip.
+         run: |
+-          chown -R 1000:1000 `pwd`
+-          su `id -un 1000` -c "whoami && java -version && ./gradlew integTest --parallel -Dsecurity.enabled=true"
++          ./gradlew integTest --parallel -Dsecurity.enabled=true
