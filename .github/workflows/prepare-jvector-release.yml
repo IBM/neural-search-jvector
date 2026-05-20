@@ -1,4 +1,4 @@
-name: Prepare JVector Release
+name: Cut JVector Release Branch
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: opensearch-project/neural-search
-          ref: main
+          ref: ${{ inputs.opensearch_version }}
           fetch-depth: 0
       
       - name: Set up JDK 21
@@ -50,12 +50,12 @@ jobs:
           git remote add jvector https://github.com/${{ github.repository }}.git
           git fetch jvector jvector_main
       
-      - name: Create release branch
+      - name: Create release branch from upstream version
         run: |
           BRANCH_NAME="jvector_${{ inputs.opensearch_version }}"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           git checkout -b $BRANCH_NAME
-          echo "Created branch $BRANCH_NAME from upstream/main"
+          echo "Created branch $BRANCH_NAME from upstream/${{ inputs.opensearch_version }}"
       
       - name: Cherry-pick jvector branding changes
         id: cherry_pick
@@ -101,7 +101,7 @@ jobs:
             - **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             **Note:** This issue was automatically created by the workflow. Close it once the release is prepared manually.`,
-              labels: ['automation', 'release']
+              labels: ['autocut', 'release']
             });
             
             core.setFailed(`Cherry-pick failed with conflicts. Created issue #${issue.data.number}`);
