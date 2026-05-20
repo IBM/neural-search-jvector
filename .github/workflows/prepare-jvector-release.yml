@@ -1,0 +1,179 @@
+name: Prepare JVector Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      opensearch_version:
+        description: 'OpenSearch version (e.g., 3.7.0)'
+        required: true
+        type: string
+      jvector_version:
+        description: 'JVector version (e.g., 3.7)'
+        required: true
+        type: string
+      jvector_commit:
+        description: 'JVector branding commit SHA to cherry-pick'
+        required: false
+        type: string
+        default: 'f53275dfe46f6f2260038b722cc053135d475950'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout upstream repository
+        uses: actions/checkout@v4
+        with:
+          repository: opensearch-project/neural-search
+          ref: main
+          fetch-depth: 0
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Add jvector remote and fetch
+        run: |
+          git remote add jvector https://github.com/${{ github.repository }}.git
+          git fetch jvector jvector_main
+      
+      - name: Create release branch
+        run: |
+          BRANCH_NAME="jvector_${{ inputs.opensearch_version }}"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          git checkout -b $BRANCH_NAME
+          echo "Created branch $BRANCH_NAME from upstream/main"
+      
+      - name: Cherry-pick jvector branding changes
+        id: cherry_pick
+        continue-on-error: true
+        run: |
+          # no commit because we will create a custom commit message
+          git cherry-pick -m 1 --no-commit ${{ inputs.jvector_commit }}
+          
+          if [ $? -eq 0 ]; then
+            git commit -m "Apply JVector branding for version ${{ inputs.jvector_version }}"
+            
+            echo "Cherry-pick successful with custom commit message"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "Cherry-pick failed with conflicts"
+            echo "success=false" >> $GITHUB_OUTPUT
+            
+            # Show conflict details
+            echo "## Conflicting files:"
+            git status --short
+            
+            # Reset to clean state
+            git reset --hard HEAD
+          fi
+      
+      - name: Create conflict issue
+        if: steps.cherry_pick.outputs.success == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Cherry-pick conflicts for JVector ${{ inputs.jvector_version }}`,
+              body: `## Cherry-pick Conflict Detected
+            
+            The automated release preparation workflow encountered conflicts when cherry-picking the jvector branding commit.
+            
+            ### Details
+            - **OpenSearch Version:** ${{ inputs.opensearch_version }}
+            - **JVector Version:** ${{ inputs.jvector_version }}
+            - **Commit to cherry-pick:** ${{ inputs.jvector_commit }}
+            - **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            **Note:** This issue was automatically created by the workflow. Close it once the release is prepared manually.`,
+              labels: ['automation', 'release']
+            });
+            
+            core.setFailed(`Cherry-pick failed with conflicts. Created issue #${issue.data.number}`);
+      
+      - name: Stop if cherry-pick failed
+        if: steps.cherry_pick.outputs.success == 'false'
+        run: exit 1
+      
+      - name: Run spotlessApply
+        run: ./gradlew spotlessApply
+      
+      - name: Commit spotless changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "Apply spotless formatting"
+            echo "Committed spotless changes"
+          else
+            echo "No spotless changes needed"
+          fi
+      
+      - name: Run unit tests
+        run: ./gradlew check
+      
+      - name: Run integration tests
+        run: ./gradlew integTest
+      
+      - name: Run backward compatibility tests
+        run: ./gradlew backwards-compatibility-test
+      
+      - name: Run build
+        run: ./gradlew build
+      
+      - name: Push branch
+        run: |
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ${{ env.BRANCH_NAME }}
+      
+      - name: Create Pull Request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Release: JVector ${{ inputs.jvector_version }} (OpenSearch ${{ inputs.opensearch_version }})`,
+              head: '${{ env.BRANCH_NAME }}',
+              base: 'jvector_main',
+              body: `## JVector Release ${{ inputs.jvector_version }}
+            
+            This PR prepares the JVector release based on OpenSearch ${{ inputs.opensearch_version }}.
+            
+            ### Changes
+            
+            - Synced with upstream OpenSearch neural-search \`main\` branch
+            - Applied JVector branding (cherry-picked commit: ${{ inputs.jvector_commit }})
+            - Applied code formatting (spotless)
+            - All tests passed
+            
+            ### Test Results
+            
+            All tests passed successfully:
+            - Unit tests (\`./gradlew check\`)
+            - Integration tests (\`./gradlew integTest\`)
+            - Backward compatibility tests (\`./gradlew backwards-compatibility-test\`)
+            - Build (\`./gradlew build\`)
+            ---
+            
+            **Note:** This PR was automatically created by the release preparation workflow.`
+            });
+            
+            core.info(`Created PR #${pr.data.number}: ${pr.data.html_url}`);
+      
+      - name: Workflow Summary
+        if: success()
+        run: echo "All steps completed successfully"
