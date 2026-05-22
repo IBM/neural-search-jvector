@@ -1,0 +1,188 @@
+diff --git a/src/test/resources/mappingtransformer/expectedIndexMappingWithRemoteDenseModel.json b/src/test/resources/mappingtransformer/expectedIndexMappingWithRemoteDenseModel.json
+index 2f0626b..1d93703 100644
+--- a/src/test/resources/mappingtransformer/expectedIndexMappingWithRemoteDenseModel.json
++++ b/src/test/resources/mappingtransformer/expectedIndexMappingWithRemoteDenseModel.json
+@@ -19,9 +19,9 @@
+                   "type": "knn_vector",
+                   "dimension": 384,
+                   "method": {
+-                    "engine": "faiss",
++                    "engine": "jvector",
+                     "space_type": "l2",
+-                    "name": "hnsw",
++                    "name": "disk_ann",
+                     "parameters": {}
+                   }
+                 },
+diff --git a/src/test/resources/mappingtransformer/transformedMappingMultipleSemanticFields.json b/src/test/resources/mappingtransformer/transformedMappingMultipleSemanticFields.json
+index c2bfb7b..c31c1e1 100644
+--- a/src/test/resources/mappingtransformer/transformedMappingMultipleSemanticFields.json
++++ b/src/test/resources/mappingtransformer/transformedMappingMultipleSemanticFields.json
+@@ -16,8 +16,9 @@
+                 "embedding": {
+                   "type": "knn_vector",
+                   "method": {
++                    "engine": "jvector",
+                     "space_type": "l2",
+-                    "name": "hnsw"
++                    "name": "disk_ann"
+                   },
+                   "dimension": 768
+                 },
+diff --git a/src/test/resources/processor/IndexMappings.json b/src/test/resources/processor/IndexMappings.json
+index afe6131..46794d3 100644
+--- a/src/test/resources/processor/IndexMappings.json
++++ b/src/test/resources/processor/IndexMappings.json
+@@ -2,6 +2,7 @@
+   "settings": {
+     "index": {
+       "knn": true,
++      "knn.derived_source.enabled": false,
+       "knn.algo_param.ef_search": 100,
+       "refresh_interval": "30s",
+       "default_pipeline": "%s"
+@@ -15,9 +16,9 @@
+         "type": "knn_vector",
+         "dimension": 768,
+         "method": {
+-          "name": "hnsw",
++          "name": "disk_ann",
+           "space_type": "l2",
+-          "engine": "lucene",
++          "engine": "jvector",
+           "parameters": {
+             "ef_construction": 128,
+             "m": 24
+@@ -28,9 +29,9 @@
+         "type": "knn_vector",
+         "dimension": 768,
+         "method": {
+-          "name": "hnsw",
++          "name": "disk_ann",
+           "space_type": "l2",
+-          "engine": "lucene",
++          "engine": "jvector",
+           "parameters": {
+             "ef_construction": 128,
+             "m": 24
+@@ -41,9 +42,9 @@
+         "type": "knn_vector",
+         "dimension": 768,
+         "method": {
+-          "name": "hnsw",
++          "name": "disk_ann",
+           "space_type": "l2",
+-          "engine": "lucene",
++          "engine": "jvector",
+           "parameters": {
+             "ef_construction": 128,
+             "m": 24
+@@ -57,9 +58,9 @@
+             "type": "knn_vector",
+             "dimension": 768,
+             "method": {
+-              "name": "hnsw",
++              "name": "disk_ann",
+               "space_type": "l2",
+-              "engine": "lucene",
++              "engine": "jvector",
+               "parameters": {
+                 "ef_construction": 128,
+                 "m": 24
+@@ -72,9 +73,9 @@
+         "type": "knn_vector",
+         "dimension": 768,
+         "method": {
+-          "name": "hnsw",
++          "name": "disk_ann",
+           "space_type": "l2",
+-          "engine": "lucene",
++          "engine": "jvector",
+           "parameters": {
+             "ef_construction": 128,
+             "m": 24
+@@ -97,9 +98,9 @@
+             "type": "knn_vector",
+             "dimension": 768,
+             "method": {
+-              "name": "hnsw",
++              "name": "disk_ann",
+               "space_type": "l2",
+-              "engine": "lucene",
++              "engine": "jvector",
+               "parameters": {
+                 "ef_construction": 128,
+                 "m": 24
+@@ -118,9 +119,9 @@
+                     "type": "knn_vector",
+                     "dimension": 768,
+                     "method": {
+-                      "name": "hnsw",
++                      "name": "disk_ann",
+                       "space_type": "l2",
+-                      "engine": "lucene",
++                      "engine": "jvector",
+                       "parameters": {
+                         "ef_construction": 128,
+                         "m": 24
+diff --git a/src/test/resources/processor/mmr/SemanticIndexMapping.json b/src/test/resources/processor/mmr/SemanticIndexMapping.json
+index 45a321e..4a4084f 100644
+--- a/src/test/resources/processor/mmr/SemanticIndexMapping.json
++++ b/src/test/resources/processor/mmr/SemanticIndexMapping.json
+@@ -9,7 +9,11 @@
+         "model_id": "%s",
+         "dense_embedding_config": {
+           "method": {
+-            "engine": "lucene"
++            "engine": "jvector",
++            "name": "disk_ann",
++            "parameters": {
++              "m": 100
++            }
+           }
+         }
+       }
+diff --git a/src/test/resources/processor/semantic/SemanticIndexMappingsForDense.json b/src/test/resources/processor/semantic/SemanticIndexMappingsForDense.json
+index d9e8d61..8ab31a4 100644
+--- a/src/test/resources/processor/semantic/SemanticIndexMappingsForDense.json
++++ b/src/test/resources/processor/semantic/SemanticIndexMappingsForDense.json
+@@ -1,6 +1,7 @@
+ {
+   "settings": {
+-    "index.knn": true
++    "index.knn": true,
++    "index.knn.derived_source.enabled": false
+   },
+   "mappings": {
+     "properties": {
+@@ -15,7 +16,7 @@
+             "model_id": "%s",
+             "dense_embedding_config": {
+               "method": {
+-                "engine": "lucene"
++                "engine": "jvector"
+               }
+             }
+           }
+diff --git a/src/test/resources/processor/semantic/SemanticIndexMappingsForDenseWithChunking.json b/src/test/resources/processor/semantic/SemanticIndexMappingsForDenseWithChunking.json
+index 043b5e2..7f4e867 100644
+--- a/src/test/resources/processor/semantic/SemanticIndexMappingsForDenseWithChunking.json
++++ b/src/test/resources/processor/semantic/SemanticIndexMappingsForDenseWithChunking.json
+@@ -1,6 +1,7 @@
+ {
+   "settings": {
+-    "index.knn": true
++    "index.knn": true,
++    "index.knn.derived_source.enabled": false
+   },
+   "mappings": {
+     "properties": {
+@@ -16,7 +17,7 @@
+             "model_id": "%s",
+             "dense_embedding_config": {
+               "method": {
+-                "engine": "lucene"
++                "engine": "jvector"
+               }
+             }
+           }
