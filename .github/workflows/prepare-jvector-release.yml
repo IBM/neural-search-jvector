@@ -55,91 +55,112 @@ jobs:
           BRANCH_NAME="jvector_${{ inputs.opensearch_version }}"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           git checkout -b $BRANCH_NAME
-          echo "Created branch $BRANCH_NAME from upstream/${{ inputs.opensearch_version }}"
       
       - name: Cherry-pick jvector branding changes
         id: cherry_pick
         continue-on-error: true
         run: |
-          # no commit because we will create a custom commit message
           git cherry-pick -m 1 --no-commit ${{ inputs.jvector_commit }}
           
           if [ $? -eq 0 ]; then
             git commit -m "Apply JVector branding for version ${{ inputs.jvector_version }}"
-            
-            echo "Cherry-pick successful with custom commit message"
             echo "success=true" >> $GITHUB_OUTPUT
           else
-            echo "Cherry-pick failed with conflicts"
             echo "success=false" >> $GITHUB_OUTPUT
-            
-            # Show conflict details
-            echo "## Conflicting files:"
-            git status --short
-            
-            # Reset to clean state
             git reset --hard HEAD
           fi
       
-      - name: Create conflict issue
-        if: steps.cherry_pick.outputs.success == 'false'
+      - name: Run spotlessApply
+        if: steps.cherry_pick.outputs.success == 'true'
+        id: spotless
+        continue-on-error: true
+        run: |
+          ./gradlew spotlessApply
+          
+          if [ $? -eq 0 ]; then
+            if [ -n "$(git status --porcelain)" ]; then
+              git add .
+              git commit -m "Apply spotless formatting"
+            fi
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Run all tests and build
+        if: steps.cherry_pick.outputs.success == 'true' && steps.spotless.outputs.success == 'true'
+        id: tests
+        continue-on-error: true
+        run: |
+          ./gradlew check integTest backwards-compatibility-test build
+          
+          if [ $? -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Determine failure step
+        if: failure() || steps.cherry_pick.outputs.success == 'false' || steps.spotless.outputs.success == 'false' || steps.tests.outputs.success == 'false'
+        id: failure_info
+        run: |
+          if [ "${{ steps.cherry_pick.outputs.success }}" == "false" ]; then
+            echo "failed_step=Cherry-pick" >> $GITHUB_OUTPUT
+            echo "failed_details=Cherry-pick of commit ${{ inputs.jvector_commit }} failed with conflicts" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.spotless.outputs.success }}" == "false" ]; then
+            echo "failed_step=Spotless formatting" >> $GITHUB_OUTPUT
+            echo "failed_details=Spotless formatting failed" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.tests.outputs.success }}" == "false" ]; then
+            echo "failed_step=Tests and build" >> $GITHUB_OUTPUT
+            echo "failed_details=One or more tests failed: check, integTest, backwards-compatibility-test, or build" >> $GITHUB_OUTPUT
+          else
+            echo "failed_step=Unknown" >> $GITHUB_OUTPUT
+            echo "failed_details=Workflow failed at an unknown step" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create failure issue
+        if: failure() || steps.cherry_pick.outputs.success == 'false' || steps.spotless.outputs.success == 'false' || steps.tests.outputs.success == 'false'
         uses: actions/github-script@v7
         with:
           script: |
+            const failedStep = '${{ steps.failure_info.outputs.failed_step }}';
+            const failedDetails = '${{ steps.failure_info.outputs.failed_details }}';
+            
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Cherry-pick conflicts for JVector ${{ inputs.jvector_version }}`,
-              body: `## Cherry-pick Conflict Detected
+              title: `Release preparation failed: ${failedStep} - JVector ${{ inputs.jvector_version }}`,
+              body: `## Release Preparation Failed
             
-            The automated release preparation workflow encountered conflicts when cherry-picking the jvector branding commit.
-            
-            ### Details
-            - **OpenSearch Version:** ${{ inputs.opensearch_version }}
-            - **JVector Version:** ${{ inputs.jvector_version }}
-            - **Commit to cherry-pick:** ${{ inputs.jvector_commit }}
-            - **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            **Note:** This issue was automatically created by the workflow. Close it once the release is prepared manually.`,
+                    **Failed Step:** ${failedStep}
+                    **OpenSearch Version:** ${{ inputs.opensearch_version }}
+                    **JVector Version:** ${{ inputs.jvector_version }}
+                    **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                    
+                    ### Failure Details
+                    
+                    ${failedDetails}
+                    
+                    ### Next Steps
+                    
+                    1. Review the workflow logs for detailed error messages
+                    2. Follow manual resolution steps above
+                    3. Fix the issue locally
+                    4. Push branch and create PR manually
+                    5. Close this issue once resolved
+                  `,
               labels: ['autocut', 'release']
             });
             
-            core.setFailed(`Cherry-pick failed with conflicts. Created issue #${issue.data.number}`);
-      
-      - name: Stop if cherry-pick failed
-        if: steps.cherry_pick.outputs.success == 'false'
-        run: exit 1
-      
-      - name: Run spotlessApply
-        run: ./gradlew spotlessApply
-      
-      - name: Commit spotless changes
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "Apply spotless formatting"
-            echo "Committed spotless changes"
-          else
-            echo "No spotless changes needed"
-          fi
-      
-      - name: Run unit tests
-        run: ./gradlew check
-      
-      - name: Run integration tests
-        run: ./gradlew integTest
-      
-      - name: Run backward compatibility tests
-        run: ./gradlew backwards-compatibility-test
-      
-      - name: Run build
-        run: ./gradlew build
+            core.setFailed(\`Release preparation failed at: \${failedStep}. Created issue #\${issue.data.number}\`);
       
       - name: Push branch
+        if: steps.tests.outputs.success == 'true'
         run: |
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ${{ env.BRANCH_NAME }}
       
       - name: Create Pull Request
+        if: steps.tests.outputs.success == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -150,30 +171,25 @@ jobs:
               head: '${{ env.BRANCH_NAME }}',
               base: 'jvector_main',
               body: `## JVector Release ${{ inputs.jvector_version }}
-            
-            This PR prepares the JVector release based on OpenSearch ${{ inputs.opensearch_version }}.
-            
-            ### Changes
-            
-            - Synced with upstream OpenSearch neural-search \`main\` branch
-            - Applied JVector branding (cherry-picked commit: ${{ inputs.jvector_commit }})
-            - Applied code formatting (spotless)
-            - All tests passed
-            
-            ### Test Results
-            
-            All tests passed successfully:
-            - Unit tests (\`./gradlew check\`)
-            - Integration tests (\`./gradlew integTest\`)
-            - Backward compatibility tests (\`./gradlew backwards-compatibility-test\`)
-            - Build (\`./gradlew build\`)
-            ---
-            
-            **Note:** This PR was automatically created by the release preparation workflow.`
+                    This PR prepares the JVector release based on OpenSearch ${{ inputs.opensearch_version }}.
+                    
+                    ### Changes
+                    
+                    - [x] Synced with upstream OpenSearch neural-search
+                    - [x] Applied JVector branding
+                    - [x] Applied code formatting
+                    
+                    ### Test Results
+                    
+                    All tests passed:
+                    - [x] Unit tests
+                    - [x] Integration tests
+                    - [x] Backward compatibility tests
+                    - [x] Build
+                    
+                    **Workflow:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                    `,
+              labels: [ 'autocut', 'release' ]
             });
             
-            core.info(`Created PR #${pr.data.number}: ${pr.data.html_url}`);
-      
-      - name: Workflow Summary
-        if: success()
-        run: echo "All steps completed successfully"
+            core.info(\`Created PR #\${pr.data.number}\`);
