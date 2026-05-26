@@ -100,59 +100,252 @@ jobs:
             echo "success=false" >> $GITHUB_OUTPUT
           fi
       
-      - name: Determine failure step
-        if: failure() || steps.cherry_pick.outputs.success == 'false' || steps.spotless.outputs.success == 'false' || steps.tests.outputs.success == 'false'
-        id: failure_info
+      - name: Determine workflow status
+        id: workflow_status
+        if: always()
         run: |
           if [ "${{ steps.cherry_pick.outputs.success }}" == "false" ]; then
-            echo "failed_step=Cherry-pick" >> $GITHUB_OUTPUT
-            echo "failed_details=Cherry-pick of commit ${{ inputs.jvector_commit }} failed with conflicts" >> $GITHUB_OUTPUT
+            cat >> $GITHUB_OUTPUT << 'EOF'
+          status=failed
+          failed_step=Cherry-pick
+          failed_details=Cherry-pick of commit ${{ inputs.jvector_commit }} failed with conflicts
+          EOF
           elif [ "${{ steps.spotless.outputs.success }}" == "false" ]; then
-            echo "failed_step=Spotless formatting" >> $GITHUB_OUTPUT
-            echo "failed_details=Spotless formatting failed" >> $GITHUB_OUTPUT
+            cat >> $GITHUB_OUTPUT << 'EOF'
+          status=failed
+          failed_step=Spotless formatting
+          failed_details=Spotless formatting failed
+          EOF
           elif [ "${{ steps.tests.outputs.success }}" == "false" ]; then
-            echo "failed_step=Tests and build" >> $GITHUB_OUTPUT
-            echo "failed_details=One or more tests failed: check, integTest, backwards-compatibility-test, or build" >> $GITHUB_OUTPUT
+            cat >> $GITHUB_OUTPUT << 'EOF'
+          status=failed
+          failed_step=Tests and build
+          failed_details=One or more tests failed: check, integTest, backwards-compatibility-test, or build
+          EOF
+          elif [ "${{ steps.tests.outputs.success }}" == "true" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
           else
-            echo "failed_step=Unknown" >> $GITHUB_OUTPUT
-            echo "failed_details=Workflow failed at an unknown step" >> $GITHUB_OUTPUT
+            cat >> $GITHUB_OUTPUT << 'EOF'
+          status=failed
+          failed_step=Unknown
+          failed_details=Workflow failed at an unknown step
+          EOF
           fi
       
-      - name: Create failure issue
-        if: failure() || steps.cherry_pick.outputs.success == 'false' || steps.spotless.outputs.success == 'false' || steps.tests.outputs.success == 'false'
+      - name: Create tracking issue
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const failedStep = '${{ steps.failure_info.outputs.failed_step }}';
-            const failedDetails = '${{ steps.failure_info.outputs.failed_details }}';
+            const status = '${{ steps.workflow_status.outputs.status }}';
+            const failedStep = '${{ steps.workflow_status.outputs.failed_step }}';
+            const failedDetails = '${{ steps.workflow_status.outputs.failed_details }}';
+            const branchName = '${{ env.BRANCH_NAME }}';
+            
+            let title, body;
+            
+            if (status === 'success') {
+              title = `Complete JVector release preparation - JVector ${{ inputs.jvector_version }}`;
+              body = `## Release Preparation - Branding Complete
+            
+            **Branch:** \`${branchName}\`
+            **OpenSearch Version:** ${{ inputs.opensearch_version }}
+            **JVector Version:** ${{ inputs.jvector_version }}
+            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ### Status
+            
+            Branding changes have been successfully applied and all tests passed.
+            
+            ### Next Steps - Manual JVector Plugin Usage Changes
+            
+            1. **Checkout the release branch locally:**
+               \`\`\`bash
+               git fetch origin
+               git checkout ${branchName}
+               \`\`\`
+            
+            2. **Run the JVector support automation script:**
+               \`\`\`bash
+               ./.github/scripts/apply-jvector-support.sh ${{ inputs.jvector_version }}.0
+               \`\`\`
+               
+               **Master script:** \`.github/scripts/apply-jvector-support.sh\`
+               
+               **If script fails:**
+               - Check script execution permissions: \`chmod +x .github/scripts/*.sh\`
+               - Review individual script logs in \`.github/scripts/\` directory
+               - Scripts are numbered (00-06) and run in sequence
+               - Check for perl/sed availability on your system
+               - Review patch application errors: \`git apply --check .github/patches/*.patch\`
+            
+            3. **Run code formatting:**
+               \`\`\`bash
+               ./gradlew spotlessApply
+               \`\`\`
+            
+            4. **Run tests:**
+               \`\`\`bash
+               ./gradlew check integTest
+               \`\`\`
+            
+            5. **Run build:**
+               \`\`\`bash
+               ./gradlew build
+               \`\`\`
+            
+            6. **Verify changes locally:**
+               \`\`\`bash
+               git diff
+               \`\`\`
+            
+            7. **Commit and push changes:**
+               \`\`\`bash
+               git add .
+               git commit -m "Apply JVector plugin usage changes for v${{ inputs.jvector_version }}"
+               git push origin ${branchName}
+               \`\`\`
+            
+            ### Manual Resolution Steps
+            
+            If automation script fails:
+            - Review \`.github/patches/\` directory for patch files
+            - Apply patches manually: \`git apply .github/patches/<patch-name>.patch\`
+            - Run individual scripts from \`.github/scripts/\` directory
+            - Check script output for specific error messages
+            - Refer to commit bd09f6ca and ce16f36 from jvector_3.6 branch for reference
+            
+            ### Verification Checklist
+            
+            - [ ] Script executed successfully
+            - [ ] Code formatted with spotlessApply
+            - [ ] All tests pass (check, integTest)
+            - [ ] Build completes successfully
+            - [ ] Changes reviewed and verified
+            - [ ] Changes committed and pushed
+            - [ ] PR created or updated
+            
+            Once complete, close this issue.`;
+            } else {
+              title = `Release preparation failed: ${failedStep} - JVector ${{ inputs.jvector_version }}`;
+              body = `## Release Preparation Failed
+            
+            **Failed Step:** ${failedStep}
+            **Branch:** \`${branchName}\`
+            **OpenSearch Version:** ${{ inputs.opensearch_version }}
+            **JVector Version:** ${{ inputs.jvector_version }}
+            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ### Failure Details
+            
+            ${failedDetails}
+            
+            ### Next Steps - Fix Branding Issues
+            
+            1. **Checkout the release branch locally:**
+               \`\`\`bash
+               git fetch origin
+               git checkout ${branchName}
+               \`\`\`
+            
+            2. **Resolve the branding changes failure:**
+            
+               ${failedStep === 'Cherry-pick' ? `
+               **Cherry-pick conflicts:**
+               - Manually cherry-pick the branding commit:
+                 \`\`\`bash
+                 git cherry-pick -m 1 ${{ inputs.jvector_commit }}
+                 \`\`\`
+               - Resolve conflicts in affected files
+               - Complete the cherry-pick:
+                 \`\`\`bash
+                 git add .
+                 git cherry-pick --continue
+                 \`\`\`
+               ` : failedStep === 'Spotless formatting' ? `
+               **Spotless formatting issues:**
+               - Run spotless locally and fix issues:
+                 \`\`\`bash
+                 ./gradlew spotlessApply
+                 \`\`\`
+               - Review and commit formatting changes
+               ` : failedStep === 'Tests and build' ? `
+               **Test or build failures:**
+               - Review workflow logs for specific test failures
+               - Run tests locally to reproduce:
+                 \`\`\`bash
+                 ./gradlew check integTest backwards-compatibility-test build
+                 \`\`\`
+               - Fix failing tests or build issues
+               - Commit fixes
+               ` : `
+               **Unknown failure:**
+               - Review workflow logs for error details
+               - Check each step output
+               - Fix identified issues
+               `}
+            
+            3. **After fixing branding issues, apply JVector plugin usage changes:**
+               \`\`\`bash
+               ./.github/scripts/apply-jvector-support.sh ${{ inputs.jvector_version }}.0
+               \`\`\`
+               
+               **Master script:** \`.github/scripts/apply-jvector-support.sh\`
+               
+               **If script fails:**
+               - Check script execution permissions: \`chmod +x .github/scripts/*.sh\`
+               - Review individual script logs
+               - Apply patches manually if needed: \`git apply .github/patches/<patch-name>.patch\`
+            
+            4. **Run code formatting:**
+               \`\`\`bash
+               ./gradlew spotlessApply
+               \`\`\`
+            
+            5. **Run tests:**
+               \`\`\`bash
+               ./gradlew check integTest
+               \`\`\`
+            
+            6. **Run build:**
+               \`\`\`bash
+               ./gradlew build
+               \`\`\`
+            
+            7. **Verify and push changes:**
+               \`\`\`bash
+               git diff
+               git add .
+               git commit -m "Apply JVector changes for v${{ inputs.jvector_version }}"
+               git push origin ${branchName}
+               \`\`\`
+            
+            ### Manual Resolution Steps
+            
+            If automation script fails:
+            - Review \`.github/patches/\` directory for patch files
+            - Apply patches manually: \`git apply .github/patches/<patch-name>.patch\`
+            - Run individual scripts from \`.github/scripts/\` directory (numbered 00-06)
+            - Check script output for specific error messages
+            - Refer to commit bd09f6ca and ce16f36 from jvector_3.6 branch for reference
+            
+            Once resolved, close this issue.`;
+            }
             
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Release preparation failed: ${failedStep} - JVector ${{ inputs.jvector_version }}`,
-              body: `## Release Preparation Failed
-            
-                    **Failed Step:** ${failedStep}
-                    **OpenSearch Version:** ${{ inputs.opensearch_version }}
-                    **JVector Version:** ${{ inputs.jvector_version }}
-                    **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-                    
-                    ### Failure Details
-                    
-                    ${failedDetails}
-                    
-                    ### Next Steps
-                    
-                    1. Review the workflow logs for detailed error messages
-                    2. Follow manual resolution steps above
-                    3. Fix the issue locally
-                    4. Push branch and create PR manually
-                    5. Close this issue once resolved
-                  `,
-              labels: ['autocut', 'release']
+              title: title,
+              body: body,
+              labels: ['autocut', 'release'],
+              assignees: ['kush992']
             });
             
-            core.setFailed(\`Release preparation failed at: \${failedStep}. Created issue #\${issue.data.number}\`);
+            core.info(\`Created issue #\${issue.data.number}\`);
+            
+            if (status === 'failed') {
+              core.setFailed(\`Release preparation failed at: \${failedStep}. Created issue #\${issue.data.number}\`);
+            }
       
       - name: Push branch
         if: steps.tests.outputs.success == 'true'
@@ -175,21 +368,23 @@ jobs:
                     
                     ### Changes
                     
-                    - [x] Synced with upstream OpenSearch neural-search
-                    - [x] Applied JVector branding
-                    - [x] Applied code formatting
+                    - [ ] Synced with upstream OpenSearch neural-search
+                    - [ ] Applied JVector branding
+                    - [ ] Applied JVector plugin usage instead of k-NN
+                    - [ ] Applied code formatting
                     
                     ### Test Results
                     
                     All tests passed:
-                    - [x] Unit tests
-                    - [x] Integration tests
-                    - [x] Backward compatibility tests
-                    - [x] Build
+                    - [ ] Unit tests
+                    - [ ] Integration tests
+                    - [ ] Backward compatibility tests
+                    - [ ] Build
                     
                     **Workflow:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
                     `,
-              labels: [ 'autocut', 'release' ]
+              labels: [ 'autocut', 'release' ],
+              assignees: ['kush992']
             });
             
             core.info(\`Created PR #\${pr.data.number}\`);
