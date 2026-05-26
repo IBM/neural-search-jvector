@@ -1,7 +1,7 @@
 #!/bin/bash
 # Master script to apply JVector support transformations
 # Applies patches first, then runs transformation scripts
-# Usage: ./apply-jvector-support.sh [jvector_version]
+# Usage: ./apply-jvector-support.sh <jvector_version>
 # Example: ./apply-jvector-support.sh 3.7.0.0
 
 set -e
@@ -10,7 +10,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCHES_DIR="$SCRIPT_DIR/../patches"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-JVECTOR_VERSION="${1:-3.6.0.0-SNAPSHOT}"
+# Require jvector version parameter
+if [ -z "$1" ]; then
+    echo "Error: JVector version parameter is required"
+    echo "Usage: $0 <jvector_version>"
+    echo "Example: $0 3.7.0.0"
+    exit 1
+fi
+
+JVECTOR_VERSION="$1"
 
 cd "$REPO_ROOT"
 
@@ -35,10 +43,16 @@ for patch in "$PATCHES_DIR"/*.patch; do
 done
 echo ""
 
-# Step 2: Set jvector version
-echo "Step 2: Setting jvector version"
-chmod +x "$SCRIPT_DIR"/00-set-jvector-version.sh
-"$SCRIPT_DIR"/00-set-jvector-version.sh "$JVECTOR_VERSION"
+# Step 2: Update jvector version in build.gradle
+echo "Step 2: Setting jvector version in build.gradle"
+if [ -f "build.gradle" ]; then
+    sed -i.bak "s/jvector_version = System.getProperty(\"jvector.version\", \".*\")/jvector_version = System.getProperty(\"jvector.version\", \"$JVECTOR_VERSION\")/" build.gradle
+    rm -f build.gradle.bak
+    echo "Updated build.gradle with version $JVECTOR_VERSION"
+else
+    echo "Error: build.gradle not found"
+    exit 1
+fi
 echo ""
 
 # Step 3: Run transformation scripts
@@ -55,4 +69,9 @@ echo ""
 echo "=========================================="
 echo "JVector Support Applied"
 echo "=========================================="
-
+echo ""
+echo "Next steps:"
+echo "  1. Review: git diff"
+echo "  2. Format: ./gradlew spotlessApply"
+echo "  3. Test: ./gradlew check integTest"
+echo "  4. Commit: git add . && git commit -m 'Apply JVector support for v$JVECTOR_VERSION'"

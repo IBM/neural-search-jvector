@@ -175,7 +175,7 @@ jobs:
                **If script fails:**
                - Check script execution permissions: \`chmod +x .github/scripts/*.sh\`
                - Review individual script logs in \`.github/scripts/\` directory
-               - Scripts are numbered (00-06) and run in sequence
+               - Scripts are numbered (01-06) and run in sequence
                - Check for perl/sed availability on your system
                - Review patch application errors: \`git apply --check .github/patches/*.patch\`
             
@@ -325,7 +325,7 @@ jobs:
             If automation script fails:
             - Review \`.github/patches/\` directory for patch files
             - Apply patches manually: \`git apply .github/patches/<patch-name>.patch\`
-            - Run individual scripts from \`.github/scripts/\` directory (numbered 00-06)
+            - Run individual scripts from \`.github/scripts/\` directory (numbered 01-06)
             - Check script output for specific error messages
             - Refer to commit bd09f6ca and ce16f36 from jvector_3.6 branch for reference
             
