@@ -19,6 +19,7 @@ if [ -z "$1" ]; then
 fi
 
 JVECTOR_VERSION="$1"
+export JVECTOR_VERSION  # Export for use by child scripts
 
 cd "$REPO_ROOT"
 
@@ -43,23 +44,11 @@ for patch in "$PATCHES_DIR"/*.patch; do
 done
 echo ""
 
-# Step 2: Update jvector version in build.gradle
-echo "Step 2: Setting jvector version in build.gradle"
-if [ -f "build.gradle" ]; then
-    sed -i.bak "s/jvector_version = System.getProperty(\"jvector.version\", \".*\")/jvector_version = System.getProperty(\"jvector.version\", \"$JVECTOR_VERSION\")/" build.gradle
-    rm -f build.gradle.bak
-    echo "Updated build.gradle with version $JVECTOR_VERSION"
-else
-    echo "Error: build.gradle not found"
-    exit 1
-fi
-echo ""
-
-# Step 3: Run transformation scripts
-echo "Step 3: Running transformation scripts"
+# Step 2: Run transformation scripts
+echo "Step 2: Running transformation scripts"
 chmod +x "$SCRIPT_DIR"/*.sh
 
-for script in "$SCRIPT_DIR"/[0-9][1-9]*.sh; do
+for script in "$SCRIPT_DIR"/[0-9][0-9]*.sh; do
     if [ -f "$script" ]; then
         "$script"
     fi
