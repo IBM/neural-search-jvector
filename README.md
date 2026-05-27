@@ -8,7 +8,7 @@
 
 ## OpenSearch Neural Search for JVector
 **OpenSearch Neural Search for JVector** is an OpenSearch plugin that adds dense neural retrieval with JVector into the OpenSearch ecosystem.
-The plugin provides the capability for indexing documents and doing neural search on the indexed documents. This repository is a fork of 
+The plugin provides the capability for indexing documents and doing neural search on the indexed documents. This repository is a fork of
 official [Neural Search](https://github.com/opensearch-project/neural-search/) plugin that integrates with [OpenSearch JVector](https://github.com/opensearch-project/opensearch-jvector/)
 as the vector engine.
 

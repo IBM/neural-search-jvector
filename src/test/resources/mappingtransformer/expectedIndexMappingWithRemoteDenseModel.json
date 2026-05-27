@@ -19,9 +19,9 @@
                   "type": "knn_vector",
                   "dimension": 384,
                   "method": {
-                    "engine": "faiss",
+                    "engine": "jvector",
                     "space_type": "l2",
-                    "name": "hnsw",
+                    "name": "disk_ann",
                     "parameters": {}
                   }
                 },
