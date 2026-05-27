@@ -15,18 +15,16 @@ for file in \
     "src/testFixtures/java/org/opensearch/neuralsearch/OpenSearchSecureRestTestCase.java"
 do
     if [ -f "$file" ] && grep -q "import static org.opensearch.knn.common.KNNConstants.MODEL_INDEX_NAME" "$file"; then
-        sed -i.bak 's|import static org.opensearch.knn.common.KNNConstants.MODEL_INDEX_NAME;|import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_INDEX_NAME;|' "$file"
-        rm -f "${file}.bak"
-        echo "Updated: $file"
+        sed 's|import static org.opensearch.knn.common.KNNConstants.MODEL_INDEX_NAME;|import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_INDEX_NAME;|' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        echo "  - Updated: $file"
     fi
 done
 
 # File that imports MODEL_ID
 file="src/test/java/org/opensearch/neuralsearch/processor/mmr/MMRNeuralQueryTransformerIT.java"
 if [ -f "$file" ] && grep -q "import static org.opensearch.knn.common.KNNConstants.MODEL_ID" "$file"; then
-    sed -i.bak 's|import static org.opensearch.knn.common.KNNConstants.MODEL_ID;|import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_ID;|' "$file"
-    rm -f "${file}.bak"
-    echo "Updated: $file"
+    sed 's|import static org.opensearch.knn.common.KNNConstants.MODEL_ID;|import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_ID;|' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    echo "  - Updated: $file"
 fi
 
 echo "Import replacement complete"
