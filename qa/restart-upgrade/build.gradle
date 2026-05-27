@@ -7,6 +7,21 @@ import org.opensearch.gradle.testclusters.StandaloneRestIntegTestTask
 
 apply from : "$rootDir/qa/build.gradle"
 
+// Conditionally exclude BWC tests that use RescoreContext when using jvector
+// RescoreContext is a knn-specific class not available in opensearch-jvector-plugin
+// These tests verify hybrid search with rescoring functionality which requires knn plugin
+// MUST be after apply from to override sourceSets configuration
+if (rootProject.ext.isJVectorEngine) {
+    sourceSets {
+        test {
+            java {
+                exclude '**/bwc/restart/HybridSearchIT.java'
+                exclude '**/bwc/restart/HybridSearchWithRescoreIT.java'
+            }
+        }
+    }
+}
+
 def ext=rootProject.ext
 String baseName = "neuralSearchBwcCluster-restart"
 
