@@ -15,7 +15,7 @@ import java.util.concurrent.Callable
 buildscript {
     ext {
         opensearch_version = System.getProperty("opensearch.version", "3.6.0-SNAPSHOT")
-        jvector_version = System.getProperty("jvector.version", "3.7.0.0")
+        jvector_version = System.getProperty("jvector.version", "3.6.0.0")
         buildVersionQualifier = System.getProperty("build.version_qualifier", "")
         isSnapshot = "true" == System.getProperty("build.snapshot", "true")
         isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "false")
@@ -94,7 +94,6 @@ ext {
     }
 
     isSnapshot = "true" == System.getProperty("build.snapshot", "true")
-    isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "false")
     projectSubstitutions = [:]
 
     configureSecurityPlugin = { OpenSearchCluster cluster ->
@@ -211,6 +210,40 @@ def projectPath = 'org.opensearch'
 def pathToPlugin = 'neuralsearch.plugin'
 def pluginClassName = 'NeuralSearch'
 
+publishing {
+    repositories {
+        maven {
+            name = "Snapshots"
+            url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+            credentials(AwsCredentials) {
+                accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                sessionToken = System.getenv("AWS_SESSION_TOKEN")
+            }
+        }
+    }
+    publications {
+        pluginZip(MavenPublication) { publication ->
+            pom {
+                name = pluginName
+                description = pluginDescription
+                groupId = "org.opensearch.plugin"
+                licenses {
+                    license {
+                        name = "The Apache License, Version 2.0"
+                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+                developers {
+                    developer {
+                        name = "OpenSearch"
+                        url = "https://github.com/opensearch-project/neural-search"
+                    }
+                }
+            }
+        }
+    }
+}
 opensearchplugin {
     name pluginName
     description pluginDescription
@@ -218,6 +251,10 @@ opensearchplugin {
     licenseFile rootProject.file('LICENSE')
     noticeFile rootProject.file('NOTICE')
     extendedPlugins = ['opensearch-knn', 'transport-grpc']
+    if (isJVectorEngine) {
+        extendedPlugins.remove('opensearch-knn')
+        extendedPlugins.add('opensearch-jvector')
+    }
 }
 
 dependencyLicenses.enabled = false
@@ -702,7 +739,7 @@ testClusters.remoteModelIntegTest {
         }))
     }
 
-    // Install neural-search plugin
+    // This installs our neural-search plugin into the testClusters
     plugin(project.tasks.bundlePlugin.archiveFile)
 
     // Increase heap size to avoid memory issues
