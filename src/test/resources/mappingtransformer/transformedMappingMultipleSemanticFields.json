@@ -16,7 +16,6 @@
                 "embedding": {
                   "type": "knn_vector",
                   "method": {
-                    "engine": "jvector",
                     "space_type": "l2",
                     "name": "disk_ann"
                   },
