@@ -85,8 +85,6 @@ import lombok.SneakyThrows;
 import org.opensearch.neuralsearch.util.TestUtils;
 
 public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
-
-    private KNNEngine knnEngine;
     static final String VECTOR_FIELD_NAME = "vectorField";
     static final String TEXT_FIELD_NAME = "field";
     static final String QUERY_TEXT = "Hello world!";
@@ -100,6 +98,7 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
     @Mock
     private ClusterService clusterService;
     private AutoCloseable openMocks;
+    private KNNEngine knnEngine;
 
     @Override
     public void setUp() throws Exception {
@@ -112,9 +111,10 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
         TestUtils.initializeEventStatsManager();
         initKNNSettings();
         TestUtils.initializeEventStatsManager();
+
         // detect whether JVector or Knn plugin is loaded, and set KNNEngine accordingly
         String jarPath = VectorDataType.class.getProtectionDomain().getCodeSource().getLocation().toURI().getPath();
-        String jarFileName = jarPath.substring(jarPath.lastIndexOf("/") + 1);
+        String jarFileName = jarPath.substring(jarPath.lastIndexOf('/') + 1);
         if (jarFileName.contains("jvector")) knnEngine = KNNEngine.valueOf("JVECTOR");
         else knnEngine = KNNEngine.valueOf("FAISS");
     }
