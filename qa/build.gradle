@@ -40,7 +40,7 @@ dependencies {
 
     // Ensuring only one vector search plugin is on the classpath to avoid jar hell
     if (isJVectorEngine) {
-        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${jvector_version}"
+        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_build}"
     }
     else {
         zipArchive group: 'org.opensearch.plugin', name: 'opensearch-knn', version: "${opensearch_build}"
@@ -49,7 +49,7 @@ dependencies {
     zipArchive group: 'org.opensearch.plugin', name:'opensearch-ml-plugin', version: "${opensearch_build}"
 
     if (isJVectorEngine) {
-        compileOnly fileTree(dir: jvectorJarDirectory, include: ["opensearch-jvector-${jvector_version}.jar"])
+        compileOnly fileTree(dir: jvectorJarDirectory, include: ["opensearch-jvector-${opensearch_build}.jar"])
     }
     else {
         compileOnly fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])

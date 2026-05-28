@@ -21,4 +21,6 @@ public final class NeuralSearchConstants {
 
     // Model ID constant used in MMR tests
     public static final String MODEL_ID = "model_id";
+    public static final String KNN_VECTOR_ENGINE_FIELD_NAME = "engine";
+    public static final String DEFAULT_KNN_VECTOR_ENGINE = "jvector";
 }

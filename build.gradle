@@ -15,10 +15,9 @@ import java.util.concurrent.Callable
 buildscript {
     ext {
         opensearch_version = System.getProperty("opensearch.version", "3.7.0-SNAPSHOT")
-        jvector_version = System.getProperty("jvector.version", "3.6.0.0")
         buildVersionQualifier = System.getProperty("build.version_qualifier", "")
         isSnapshot = "true" == System.getProperty("build.snapshot", "true")
-        isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "false")
+        isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "true")
         version_tokens = opensearch_version.tokenize('-')
         opensearch_build = version_tokens[0] + '.0'
         plugin_no_snapshot = opensearch_build
@@ -274,7 +273,7 @@ dependencies {
 
     // Conditionally include either jvector or knn plugin
     if (isJVectorEngine) {
-        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${jvector_version}"
+        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_build}"
     } else {
         zipArchive group: 'org.opensearch.plugin', name: 'opensearch-knn', version: "${opensearch_build}"
     }
@@ -284,7 +283,7 @@ dependencies {
     // Conditionally compile with either jvector or knn plugin
     // Cannot include both as they have duplicate classes (jar hell)
     if (isJVectorEngine) {
-        compileOnly files("${jvectorJarDirectory}/opensearch-jvector-${jvector_version}.jar")
+        compileOnly files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
     } else {
         compileOnly files("${knnJarDirectory}/opensearch-knn-${opensearch_build}.jar")
         compileOnly files("${knnJarDirectory}/remote-index-build-client-${opensearch_build}.jar")
@@ -327,8 +326,8 @@ dependencies {
     // Test dependencies - use EITHER knn OR jvector, not both
     // Having both causes jar hell due to duplicate classes
     if (isJVectorEngine) {
-        testFixturesImplementation files("${jvectorJarDirectory}/opensearch-jvector-${jvector_version}.jar")
-        testImplementation files("${jvectorJarDirectory}/opensearch-jvector-${jvector_version}.jar")
+        testFixturesImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
+        testImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
         // jvector doesn't bundle commons-lang 2.x, add it explicitly
         testImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
         testFixturesImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
