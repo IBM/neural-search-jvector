@@ -46,18 +46,13 @@ jobs:
           echo "upstream_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
           echo "Found upstream commit: $UPSTREAM_COMMIT for version $UPSTREAM_VERSION"
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Create release branch from matching commit
+        id: create_branch
         run: |
           BRANCH_NAME="jvector_${{ inputs.jvector_version }}"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
@@ -81,65 +76,10 @@ jobs:
           # Create branch from the matching commit in jvector_main
           git checkout -b $BRANCH_NAME $JVECTOR_COMMIT
 
+          echo "jvector_commit=$JVECTOR_COMMIT" >> $GITHUB_OUTPUT
           echo "Created release branch: $BRANCH_NAME from commit $JVECTOR_COMMIT"
 
-      - name: Run spotlessApply
-        id: spotless
-        continue-on-error: true
-        run: |
-          ./gradlew spotlessApply
-
-          if [ $? -eq 0 ]; then
-            if [ -n "$(git status --porcelain)" ]; then
-              git add .
-              git commit -m "Apply spotless formatting"
-            fi
-            echo "success=true" >> $GITHUB_OUTPUT
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Run all tests and build
-        if: steps.spotless.outputs.success == 'true'
-        id: tests
-        continue-on-error: true
-        run: |
-          ./gradlew check integTest backwards-compatibility-test build
-
-          if [ $? -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Determine workflow status
-        id: workflow_status
-        if: always()
-        run: |
-          if [ "${{ steps.spotless.outputs.success }}" == "false" ]; then
-            cat >> $GITHUB_OUTPUT << 'EOF'
-          status=failed
-          failed_step=Spotless formatting
-          failed_details=Spotless formatting failed
-          EOF
-          elif [ "${{ steps.tests.outputs.success }}" == "false" ]; then
-            cat >> $GITHUB_OUTPUT << 'EOF'
-          status=failed
-          failed_step=Tests and build
-          failed_details=One or more tests failed: check, integTest, backwards-compatibility-test, or build
-          EOF
-          elif [ "${{ steps.tests.outputs.success }}" == "true" ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-          else
-            cat >> $GITHUB_OUTPUT << 'EOF'
-          status=failed
-          failed_step=Unknown
-          failed_details=Workflow failed at an unknown step
-          EOF
-          fi
-
       - name: Push branch
-        if: steps.tests.outputs.success == 'true'
         run: |
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ${{ env.BRANCH_NAME }}
 
@@ -148,29 +88,20 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const status = '${{ steps.workflow_status.outputs.status }}';
-            const failedStep = '${{ steps.workflow_status.outputs.failed_step }}';
-            const failedDetails = '${{ steps.workflow_status.outputs.failed_details }}';
             const branchName = '${{ env.BRANCH_NAME }}';
             const upstreamCommit = '${{ steps.find_commit.outputs.upstream_commit }}';
             const upstreamVersion = '${{ steps.find_commit.outputs.upstream_version }}';
+            const jvectorCommit = '${{ steps.create_branch.outputs.jvector_commit }}';
 
-            let title, body;
-
-            if (status === 'success') {
-              title = `JVector Release ${{ inputs.jvector_version }} - Ready for Review`;
-              body = `## JVector Release ${{ inputs.jvector_version }}
+            const title = `JVector Release ${{ inputs.jvector_version }} - Ready for Review`;
+            const body = `## JVector Release ${{ inputs.jvector_version }}
 
             **Branch:** \`${branchName}\`
             **JVector Version:** ${{ inputs.jvector_version }}
             **Upstream Version:** ${upstreamVersion}
             **Upstream Commit:** ${upstreamCommit}
+            **JVector Commit:** ${jvectorCommit}
             **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            ### Status
-
-            ✅ Release branch created successfully
-            ✅ All tests passed
 
             ### Next Steps
 
@@ -180,73 +111,28 @@ jobs:
                git checkout ${branchName}
                \`\`\`
 
-            2. **Verify changes:**
-               - Check that JVector branding is present
-               - Verify JVector plugin integration
-               - Review any new features from upstream
+            2. **Run tests locally:**
+               \`\`\`bash
+               ./gradlew spotlessApply
+               ./gradlew check integTest build
+               \`\`\`
 
-            3. **Create release tag:**
+            3. **Verify changes:**
+               - JVector branding is present
+               - JVector plugin integration works
+               - All tests pass
+
+            4. **Create release tag:**
                \`\`\`bash
                git tag v${{ inputs.jvector_version }}
                git push origin v${{ inputs.jvector_version }}
                \`\`\`
 
-            4. **Monitor auto-release workflow:**
+            5. **Monitor auto-release workflow:**
                - GitHub release will be created automatically
                - Artifacts will be attached
 
             Once verified and tagged, close this issue.`;
-            } else {
-              title = `JVector Release ${{ inputs.jvector_version }} - Failed: ${failedStep}`;
-              body = `## JVector Release ${{ inputs.jvector_version }} - Failed
-
-            **Failed Step:** ${failedStep}
-            **Branch:** \`${branchName}\`
-            **JVector Version:** ${{ inputs.jvector_version }}
-            **Upstream Version:** ${upstreamVersion}
-            **Upstream Commit:** ${upstreamCommit}
-            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            ### Failure Details
-
-            ${failedDetails}
-
-            ### Next Steps
-
-            1. **Checkout the release branch:**
-               \`\`\`bash
-               git fetch origin
-               git checkout ${branchName}
-               \`\`\`
-
-            2. **Fix the issue:**
-               ${failedStep === 'Spotless formatting' ? `
-               - Run spotless locally:
-                 \`\`\`bash
-                 ./gradlew spotlessApply
-                 \`\`\`
-               - Review and commit formatting changes
-               ` : failedStep === 'Tests and build' ? `
-               - Review workflow logs for test failures
-               - Run tests locally:
-                 \`\`\`bash
-                 ./gradlew check integTest backwards-compatibility-test build
-                 \`\`\`
-               - Fix failing tests
-               - Commit fixes
-               ` : `
-               - Review workflow logs
-               - Fix identified issues
-               `}
-
-            3. **Verify and create tag:**
-               \`\`\`bash
-               git tag v${{ inputs.jvector_version }}
-               git push origin v${{ inputs.jvector_version }}
-               \`\`\`
-
-            Once resolved, close this issue.`;
-            }
 
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
@@ -258,7 +144,3 @@ jobs:
             });
 
             core.info(`Created issue #${issue.data.number}`);
-
-            if (status === 'failed') {
-              core.setFailed(`Release preparation failed at: ${failedStep}. Created issue #${issue.data.number}`);
-            }
