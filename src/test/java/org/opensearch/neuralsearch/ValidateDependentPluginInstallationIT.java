@@ -27,7 +27,12 @@ public class ValidateDependentPluginInstallationIT extends OpenSearchSecureRestT
 
     private static final String KNN_INDEX_NAME = "neuralsearchknnindexforvalidation";
     private static final String KNN_VECTOR_FIELD_NAME = "vectorField";
-    private static final Set<String> DEPENDENT_PLUGINS = Set.of("opensearch-ml", "opensearch-knn");
+
+    // Runtime detection of vector plugin (JVector vs KNN)
+    private static final boolean IS_JVECTOR_ENGINE = Boolean.parseBoolean(System.getProperty("opensearch.knn.isJVectorEngine", "false"));
+    private static final Set<String> DEPENDENT_PLUGINS = IS_JVECTOR_ENGINE
+        ? Set.of("opensearch-ml", "opensearch-jvector")  // JVector configuration
+        : Set.of("opensearch-ml", "opensearch-knn");     // KNN configuration (default)
     private static final String GET_PLUGINS_URL = "_cat/plugins";
     private static final String ML_PLUGIN_STATS_URL = "_plugins/_ml/stats";
     private static final String KNN_DOCUMENT_URL = KNN_INDEX_NAME + "/_doc/1?refresh";
