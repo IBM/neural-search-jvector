@@ -120,7 +120,7 @@ ext{
             return new RegularFile() {
                 @Override
                 File getAsFile() {
-                    return configurations.zipArchive.asFileTree.matching{include "**/opensearch-knn-${opensearch_build}.zip"}.getSingleFile()
+                    return configurations.zipArchive.asFileTree.matching{include "**/opensearch-jvector-${opensearch_build}.zip"}.getSingleFile()
                 }
             }
         }
@@ -177,20 +177,29 @@ task pullMlCommonsBwcPlugin {
 }
 
 // Task to pull KNN plugin from archive
-task pullKnnBwcPlugin {
+task pullJvectorBwcPlugin {
     dependsOn "pullOpensearchArtifact"
 
+    configurations {
+        zipBwcArchive
+    }
+
+    dependencies {
+        zipBwcArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${neural_search_bwc_version_no_qualifier}.0"
+    }
+
     doLast {
+        delete Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}", "plugins", "opensearch-knn")
         copy {
-            from(Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}", "plugins", "opensearch-knn"))
-            into Path.of(tmp_dir.absolutePath, "opensearch-knn")
+            from(zipTree(configurations.zipBwcArchive.singleFile))
+            into Path.of(tmp_dir.absolutePath, "opensearch-jvector")
         }
     }
 }
 
 // Task to pull job scheduler plugin from archive
 task pullJobSchedulerBwcPlugin {
-    dependsOn "pullKnnBwcPlugin"
+    dependsOn "pullJvectorBwcPlugin"
     doLast {
         copy {
             from(Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}", "plugins", "opensearch-job-scheduler"))
@@ -199,14 +208,21 @@ task pullJobSchedulerBwcPlugin {
     }
 }
 
+task unzipBwcPlugin(type: Copy) {
+    dependsOn "pullBwcPlugin"
+    from(zipTree(file(Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip"))))
+    into(Path.of(tmp_dir.absolutePath, "opensearch-neural-search"))
+}
+
 // Task to pull neural search plugin from archive
 task pullBwcPlugin {
     doLast {
-        copy {
-            from(Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}", "plugins", "opensearch-neural-search"))
-            into Path.of(tmp_dir.absolutePath, "opensearch-neural-search")
-        }
         delete Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}"), java.nio.file.Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}-${os_platform}-x64.${file_ext}")
+        ant.get(
+            src: "https://github.com/IBM/neural-search-jvector/releases/download/${neural_search_bwc_version_no_qualifier}.0/opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip",
+            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip"),
+            httpusecaches: false
+        )
     }
 }
 
@@ -234,21 +250,21 @@ task zipBwcMlCommonsPlugin(type: Zip) {
 }
 
 // Task to zip knn plugin from archive
-task zipBwcKnnPlugin(type: Zip) {
-    dependsOn "pullKnnBwcPlugin"
+task zipBwcJvectorPlugin(type: Zip) {
+    dependsOn "pullJvectorBwcPlugin"
     dependsOn "zipBwcMlCommonsPlugin"
-    from(Path.of(tmp_dir.absolutePath, "opensearch-knn"))
+    from(Path.of(tmp_dir.absolutePath, "opensearch-jvector"))
     destinationDirectory = tmp_dir
-    archiveFileName = "opensearch-knn-${neural_search_bwc_version_no_qualifier}.zip"
+    archiveFileName = "opensearch-jvector-${neural_search_bwc_version_no_qualifier}.zip"
     doLast {
-        delete Path.of(tmp_dir.absolutePath, "opensearch-knn")
+        delete Path.of(tmp_dir.absolutePath, "opensearch-jvector")
     }
 }
 
 // Task to zip neural search plugin from archive
 task zipBwcPlugin(type: Zip) {
-    dependsOn "zipBwcKnnPlugin"
-    dependsOn "pullBwcPlugin"
+    dependsOn "zipBwcJvectorPlugin"
+    dependsOn "unzipBwcPlugin"
     from(Path.of(tmp_dir.absolutePath, "opensearch-neural-search"))
     destinationDirectory = tmp_dir
     archiveFileName = "opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.zip"
