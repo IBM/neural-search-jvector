@@ -161,7 +161,7 @@ task testAgainstOneThirdUpgradedCluster(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
@@ -236,7 +236,7 @@ task testAgainstTwoThirdsUpgradedCluster(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
@@ -310,7 +310,7 @@ task testRollingUpgrade(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
