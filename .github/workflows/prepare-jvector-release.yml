@@ -1,0 +1,146 @@
+name: Cut JVector Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      jvector_version:
+        description: 'JVector version (e.g., 3.7)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout jvector repository
+        uses: actions/checkout@v4
+        with:
+          ref: jvector_main
+          fetch-depth: 0
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/opensearch-project/neural-search.git
+          git fetch upstream --tags
+
+      - name: Find upstream commit for release tag
+        id: find_commit
+        run: |
+          # Extract version without patch (e.g., 3.7.0.0 -> 3.7.0)
+          UPSTREAM_VERSION=$(echo "${{ inputs.jvector_version }}" | cut -d'.' -f1-3)
+
+          # Find the commit that the upstream tag points to
+          UPSTREAM_COMMIT=$(git rev-list -n 1 "upstream/${UPSTREAM_VERSION}" 2>/dev/null || git rev-list -n 1 "upstream/tags/${UPSTREAM_VERSION}" 2>/dev/null)
+
+          if [ -z "$UPSTREAM_COMMIT" ]; then
+            echo "Error: Could not find upstream tag or branch for version ${UPSTREAM_VERSION}"
+            exit 1
+          fi
+
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
+          echo "upstream_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+          echo "Found upstream commit: $UPSTREAM_COMMIT for version $UPSTREAM_VERSION"
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release branch from matching commit
+        id: create_branch
+        run: |
+          BRANCH_NAME="jvector_${{ inputs.jvector_version }}"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+          UPSTREAM_COMMIT="${{ steps.find_commit.outputs.upstream_commit }}"
+
+          # Find the corresponding commit in jvector_main that has the same upstream commit
+          # This assumes jvector_main has been synced with upstream main
+          JVECTOR_COMMIT=$(git log jvector_main --grep="$UPSTREAM_COMMIT" --format="%H" -n 1)
+
+          if [ -z "$JVECTOR_COMMIT" ]; then
+            # If not found by grep, find the merge commit or the commit with same tree
+            JVECTOR_COMMIT=$(git log jvector_main --all --format="%H %P" | grep "$UPSTREAM_COMMIT" | head -1 | cut -d' ' -f1)
+          fi
+
+          if [ -z "$JVECTOR_COMMIT" ]; then
+            echo "Warning: Could not find exact matching commit, using latest jvector_main"
+            JVECTOR_COMMIT="jvector_main"
+          fi
+
+          # Create branch from the matching commit in jvector_main
+          git checkout -b $BRANCH_NAME $JVECTOR_COMMIT
+
+          echo "jvector_commit=$JVECTOR_COMMIT" >> $GITHUB_OUTPUT
+          echo "Created release branch: $BRANCH_NAME from commit $JVECTOR_COMMIT"
+
+      - name: Push branch
+        run: |
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ${{ env.BRANCH_NAME }}
+
+      - name: Create tracking issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branchName = '${{ env.BRANCH_NAME }}';
+            const upstreamCommit = '${{ steps.find_commit.outputs.upstream_commit }}';
+            const upstreamVersion = '${{ steps.find_commit.outputs.upstream_version }}';
+            const jvectorCommit = '${{ steps.create_branch.outputs.jvector_commit }}';
+
+            const title = `JVector Release ${{ inputs.jvector_version }} - Ready for Review`;
+            const body = `## JVector Release ${{ inputs.jvector_version }}
+
+            **Branch:** \`${branchName}\`
+            **JVector Version:** ${{ inputs.jvector_version }}
+            **Upstream Version:** ${upstreamVersion}
+            **Upstream Commit:** ${upstreamCommit}
+            **JVector Commit:** ${jvectorCommit}
+            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### Next Steps
+
+            1. **Review the release branch:**
+               \`\`\`bash
+               git fetch origin
+               git checkout ${branchName}
+               \`\`\`
+
+            2. **Run tests locally:**
+               \`\`\`bash
+               ./gradlew spotlessApply
+               ./gradlew check integTest build
+               \`\`\`
+
+            3. **Verify changes:**
+               - JVector branding is present
+               - JVector plugin integration works
+               - All tests pass
+
+            4. **Create release tag:**
+               \`\`\`bash
+               git tag v${{ inputs.jvector_version }}
+               git push origin v${{ inputs.jvector_version }}
+               \`\`\`
+
+            5. **Monitor auto-release workflow:**
+               - GitHub release will be created automatically
+               - Artifacts will be attached
+
+            Once verified and tagged, close this issue.`;
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['autocut', 'release'],
+              assignees: ['kush992']
+            });
+
+            core.info(`Created issue #${issue.data.number}`);

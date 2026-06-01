@@ -7,6 +7,21 @@ import org.opensearch.gradle.testclusters.StandaloneRestIntegTestTask
 
 apply from : "$rootDir/qa/build.gradle"
 
+// Conditionally exclude BWC tests that use RescoreContext when using jvector
+// RescoreContext is a knn-specific class not available in opensearch-jvector-plugin
+// These tests verify hybrid search with rescoring functionality which requires knn plugin
+// MUST be after apply from to override sourceSets configuration
+if (rootProject.ext.isJVectorEngine) {
+    sourceSets {
+        test {
+            java {
+                exclude '**/bwc/rolling/HybridSearchIT.java'
+                exclude '**/bwc/rolling/HybridSearchWithRescoreIT.java'
+            }
+        }
+    }
+}
+
 def ext=rootProject.ext
 String baseName = "neuralSearchBwcCluster-rolling"
 
@@ -47,7 +62,7 @@ testClusters {
             versions = [ext.neural_search_bwc_version, opensearch_version]
             plugin(project.tasks.zipBwcJobSchedulerPlugin.archiveFile)
             plugin(project.tasks.zipBwcMlCommonsPlugin.archiveFile)
-            plugin(project.tasks.zipBwcKnnPlugin.archiveFile)
+            plugin(project.tasks.zipBwcJvectorPlugin.archiveFile)
             plugin(project.tasks.zipBwcPlugin.archiveFile)
         }
         setting 'path.repo', "${buildDir}/cluster/shared/repo/${baseName}"
@@ -146,7 +161,7 @@ task testAgainstOneThirdUpgradedCluster(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
@@ -221,7 +236,7 @@ task testAgainstTwoThirdsUpgradedCluster(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
@@ -295,7 +310,7 @@ task testRollingUpgrade(type: StandaloneRestIntegTestTask) {
     doFirst {
         // This is added to prevent the cluster from getting stuck in yellow state
         println "Waiting for cluster to stabilize after previous test, including data synchronization on replica shards"
-        Thread.sleep(10000) // 10 seconds delay
+        Thread.sleep(30000) // 30 seconds delay
 
         if(ext.bwcBundleTest){
             testClusters."${baseName}".nextNodeToNextVersion()
