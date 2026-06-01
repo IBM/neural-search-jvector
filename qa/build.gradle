@@ -82,6 +82,7 @@ String default_bwc_version = System.getProperty("bwc.version")
 String neural_search_bwc_version = System.getProperty("tests.bwc.version", default_bwc_version)
 boolean isSnapshot = neural_search_bwc_version.contains("-SNAPSHOT")
 String neural_search_bwc_version_no_qualifier = isSnapshot ? neural_search_bwc_version - "-SNAPSHOT" : neural_search_bwc_version
+String opensearch_bwc_build = neural_search_bwc_version_no_qualifier + '.0'
 
 String os_platform = "linux"
 String artifact_type = "tar"
@@ -185,7 +186,7 @@ task pullJvectorBwcPlugin {
     }
 
     dependencies {
-        zipBwcArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${neural_search_bwc_version_no_qualifier}.0"
+        zipBwcArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_bwc_build}"
     }
 
     doLast {
@@ -210,7 +211,7 @@ task pullJobSchedulerBwcPlugin {
 
 task unzipBwcPlugin(type: Copy) {
     dependsOn "pullBwcPlugin"
-    from(zipTree(file(Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip"))))
+    from(zipTree(file(Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${opensearch_bwc_build}.zip"))))
     into(Path.of(tmp_dir.absolutePath, "opensearch-neural-search"))
 }
 
@@ -219,8 +220,8 @@ task pullBwcPlugin {
     doLast {
         delete Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}"), java.nio.file.Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}-${os_platform}-x64.${file_ext}")
         ant.get(
-            src: "https://github.com/IBM/neural-search-jvector/releases/download/${neural_search_bwc_version_no_qualifier}.0/opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip",
-            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${neural_search_bwc_version_no_qualifier}.0.zip"),
+            src: "https://github.com/IBM/neural-search-jvector/releases/download/${opensearch_bwc_build}/opensearch-neural-search-${opensearch_bwc_build}.zip",
+            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${opensearch_bwc_build}.zip"),
             httpusecaches: false
         )
     }
