@@ -1,0 +1,78 @@
+name: Sync Upstream With Default
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: jvector_main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/opensearch-project/neural-search.git || true
+          git fetch upstream main
+
+      - name: Create sync branch
+        id: create_branch
+        run: |
+          BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          git checkout -b $BRANCH_NAME upstream/main
+
+          git push origin $BRANCH_NAME
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.create_branch.outputs.branch_name }}
+        run: |
+          gh pr create \
+            --base jvector_main \
+            --head "$BRANCH_NAME" \
+            --title "Weekly Sync: Upstream main → jvector_main" \
+            --label autocut \
+            --assignee kush992 \
+            --body "## Weekly Upstream Sync
+
+          This PR syncs changes from \`upstream/main\` into \`jvector_main\`.
+
+          ### Review Required
+
+          Please review the changes carefully as \`jvector_main\` contains additional modifications for the jvector plugin that may conflict with upstream changes.
+
+          ### Checklist
+
+          - [ ] Review all changes for conflicts
+          - [ ] Verify jvector-specific changes are preserved
+          - [ ] Run tests to ensure compatibility
+          - [ ] Update documentation if needed
+
+          ### Sync Details
+
+          - **Source**: \`upstream/main\`
+          - **Target**: \`jvector_main\`
+          - **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Triggered by**: ${{ github.event_name }}
+
+          ---
+
+          *This PR was automatically created by the [Sync Upstream With Default](.github/workflows/sync-upstream-with-default.yml) workflow.*" \
