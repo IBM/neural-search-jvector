@@ -50,7 +50,6 @@ jobs:
             --head "$BRANCH_NAME" \
             --title "Weekly Sync: Upstream main → jvector_main" \
             --label autocut \
-            --assignee kush992 \
             --body "## Weekly Upstream Sync
 
           This PR syncs changes from \`upstream/main\` into \`jvector_main\`.
