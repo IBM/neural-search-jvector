@@ -17,7 +17,6 @@ buildscript {
         opensearch_version = System.getProperty("opensearch.version", "3.7.0-SNAPSHOT")
         buildVersionQualifier = System.getProperty("build.version_qualifier", "")
         isSnapshot = "true" == System.getProperty("build.snapshot", "true")
-        isJVectorEngine = "true" == System.getProperty("opensearch.knn.isJVectorEngine", "true")
         version_tokens = opensearch_version.tokenize('-')
         opensearch_build = version_tokens[0] + '.0'
         plugin_no_snapshot = opensearch_build
@@ -404,7 +403,6 @@ integTest {
     systemProperty("https", is_https)
     systemProperty("user", user)
     systemProperty("password", password)
-    systemProperty 'opensearch.knn.isJVectorEngine', isJVectorEngine
 
     doFirst {
         // Tell the test JVM if the cluster JVM is running under a debugger so that tests can
