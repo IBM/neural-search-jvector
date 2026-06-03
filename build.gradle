@@ -250,11 +250,7 @@ opensearchplugin {
     classname "${projectPath}.${pathToPlugin}.${pluginClassName}"
     licenseFile rootProject.file('LICENSE')
     noticeFile rootProject.file('NOTICE')
-    extendedPlugins = ['opensearch-knn', 'transport-grpc']
-    if (isJVectorEngine) {
-        extendedPlugins.remove('opensearch-knn')
-        extendedPlugins.add('opensearch-jvector')
-    }
+    extendedPlugins = ['opensearch-jvector', 'transport-grpc']
 }
 
 dependencyLicenses.enabled = false
@@ -271,23 +267,11 @@ dependencies {
     implementation group: 'org.opensearch.plugin', name:'mapper-extras-client', version: "${opensearch_version}"
     zipArchive group: 'org.opensearch.plugin', name:'opensearch-job-scheduler', version: "${opensearch_build}"
 
-    // Conditionally include either jvector or knn plugin
-    if (isJVectorEngine) {
-        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_build}"
-    } else {
-        zipArchive group: 'org.opensearch.plugin', name: 'opensearch-knn', version: "${opensearch_build}"
-    }
+    zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_build}"
     zipArchive group: 'org.opensearch.plugin', name:'opensearch-ml-plugin', version: "${opensearch_build}"
     secureIntegTestPluginArchive group: 'org.opensearch.plugin', name:'opensearch-security', version: "${opensearch_build}"
 
-    // Conditionally compile with either jvector or knn plugin
-    // Cannot include both as they have duplicate classes (jar hell)
-    if (isJVectorEngine) {
-        compileOnly files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
-    } else {
-        compileOnly files("${knnJarDirectory}/opensearch-knn-${opensearch_build}.jar")
-        compileOnly files("${knnJarDirectory}/remote-index-build-client-${opensearch_build}.jar")
-    }
+    compileOnly files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
     compileOnly "org.opensearch.plugin:transport-grpc-spi:${opensearch_version}"
     compileOnly "org.opensearch:protobufs:${versions.opensearchprotobufs}"
     compileOnly (group: 'com.google.guava', name: 'guava', version:"${versions.guava}") {
@@ -323,18 +307,12 @@ dependencies {
     testFixturesCompileOnly (group: 'com.google.guava', name: 'guava', version:"${versions.guava}") {
         exclude group: 'com.google.errorprone', module: 'error_prone_annotations'
     }
-    // Test dependencies - use EITHER knn OR jvector, not both
-    // Having both causes jar hell due to duplicate classes
-    if (isJVectorEngine) {
-        testFixturesImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
-        testImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
-        // jvector doesn't bundle commons-lang 2.x, add it explicitly
-        testImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
-        testFixturesImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
-    } else {
-        testFixturesImplementation fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])
-        testImplementation fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])
-    }
+
+    testFixturesImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
+    testImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
+    // jvector doesn't bundle commons-lang 2.x, add it explicitly
+    testImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
+    testFixturesImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
     testImplementation "org.opensearch.plugin:parent-join-client:${opensearch_version}"
     testImplementation 'org.assertj:assertj-core:3.27.7'
     testImplementation group: 'net.bytebuddy', name: 'byte-buddy', version: "${versions.bytebuddy}"
@@ -368,36 +346,20 @@ task extractJvectorJar(type: Copy) {
     into jvectorJarDirectory
 }
 
-// Set up dependencies for delombok task based on engine type
-if (isJVectorEngine) {
-    project.tasks.delombok.dependsOn(extractJvectorJar)
-} else {
-    project.tasks.delombok.dependsOn(extractKnnJar)
-}
+// Set up dependencies for delombok task for JVector engine
+project.tasks.delombok.dependsOn(extractJvectorJar)
 
 compileJava {
-    if (isJVectorEngine) {
-        dependsOn extractJvectorJar
-    } else {
-        dependsOn extractKnnJar
-    }
+    dependsOn extractJvectorJar
     dependsOn spotlessApply
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 compileTestJava {
-    if (isJVectorEngine) {
-        dependsOn extractJvectorJar
-    } else {
-        dependsOn extractKnnJar
-    }
+    dependsOn extractJvectorJar
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 compileTestFixturesJava {
-    if (isJVectorEngine) {
-        dependsOn extractJvectorJar
-    } else {
-        dependsOn extractKnnJar
-    }
+    dependsOn extractJvectorJar
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 
