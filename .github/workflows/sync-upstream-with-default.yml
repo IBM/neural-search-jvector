@@ -16,7 +16,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: jvector_main
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -30,17 +30,21 @@ jobs:
           git remote add upstream https://github.com/opensearch-project/neural-search.git || true
           git fetch upstream main
 
-      - name: Create sync branch
+      - name: Step 1 - Merge upstream into main
+        run: |
+          git checkout main
+          git merge upstream/main --no-edit -m "Merge upstream/main into neural-search-jvector:main"
+          git push origin main
+
+      - name: Step 2 - Create sync branch from main
         id: create_branch
         run: |
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-
-          git checkout -b $BRANCH_NAME upstream/main
-
+          git checkout -b $BRANCH_NAME main
           git push origin $BRANCH_NAME
 
-      - name: Create Pull Request
+      - name: Step 3 - Create Pull Request to jvector_main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH_NAME: ${{ steps.create_branch.outputs.branch_name }}
@@ -48,15 +52,20 @@ jobs:
           gh pr create \
             --base jvector_main \
             --head "$BRANCH_NAME" \
-            --title "Weekly Sync: Upstream main → jvector_main" \
+            --title "Sync Upstream main to jvector_main" \
             --label autocut \
             --body "## Weekly Upstream Sync
 
-          This PR syncs changes from \`upstream/main\` into \`jvector_main\`.
+          This PR syncs changes from upstream/main into jvector_main.
+
+          ### Process
+
+          Step 1: Merged \`upstream/main\` into \`neural-search-jvector:main\`
+          Step 2: Created sync branch from \`neural-search-jvector:main\`
 
           ### Review Required
 
-          Please review the changes carefully as \`jvector_main\` contains additional modifications for the jvector plugin that may conflict with upstream changes.
+          Please review the changes carefully as jvector_main contains additional modifications for the jvector plugin that may conflict with upstream changes.
 
           ### Checklist
 
@@ -74,4 +83,4 @@ jobs:
 
           ---
 
-          *This PR was automatically created by the [Sync Upstream With Default](.github/workflows/sync-upstream-with-default.yml) workflow.*" \
+          *This PR was automatically created by the Sync Upstream With Default workflow.*"
