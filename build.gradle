@@ -209,13 +209,47 @@ def projectPath = 'org.opensearch'
 def pathToPlugin = 'neuralsearch.plugin'
 def pluginClassName = 'NeuralSearch'
 
+publishing {
+    repositories {
+        maven {
+            name = "Snapshots"
+            url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+            credentials(AwsCredentials) {
+                accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                sessionToken = System.getenv("AWS_SESSION_TOKEN")
+            }
+        }
+    }
+    publications {
+        pluginZip(MavenPublication) { publication ->
+            pom {
+                name = pluginName
+                description = pluginDescription
+                groupId = "org.opensearch.plugin"
+                licenses {
+                    license {
+                        name = "The Apache License, Version 2.0"
+                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+                developers {
+                    developer {
+                        name = "OpenSearch"
+                        url = "https://github.com/opensearch-project/neural-search"
+                    }
+                }
+            }
+        }
+    }
+}
 opensearchplugin {
     name pluginName
     description pluginDescription
     classname "${projectPath}.${pathToPlugin}.${pluginClassName}"
     licenseFile rootProject.file('LICENSE')
     noticeFile rootProject.file('NOTICE')
-    extendedPlugins = ['opensearch-knn', 'transport-grpc']
+    extendedPlugins = ['opensearch-jvector', 'transport-grpc']
 }
 
 dependencyLicenses.enabled = false
@@ -225,15 +259,18 @@ loggerUsageCheck.enabled = false
 validateNebulaPom.enabled = false
 
 def knnJarDirectory = "$buildDir/dependencies/opensearch-knn"
+def jvectorJarDirectory = "$buildDir/dependencies/opensearch-jvector-plugin"
 
 dependencies {
     api "org.opensearch:opensearch:${opensearch_version}"
     implementation group: 'org.opensearch.plugin', name:'mapper-extras-client', version: "${opensearch_version}"
     zipArchive group: 'org.opensearch.plugin', name:'opensearch-job-scheduler', version: "${opensearch_build}"
-    zipArchive group: 'org.opensearch.plugin', name:'opensearch-knn', version: "${opensearch_build}"
+
+    zipArchive group: 'org.opensearch.plugin', name: 'opensearch-jvector-plugin', version: "${opensearch_build}"
     zipArchive group: 'org.opensearch.plugin', name:'opensearch-ml-plugin', version: "${opensearch_build}"
     secureIntegTestPluginArchive group: 'org.opensearch.plugin', name:'opensearch-security', version: "${opensearch_build}"
-    compileOnly fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])
+
+    compileOnly files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
     compileOnly "org.opensearch.plugin:transport-grpc-spi:${opensearch_version}"
     compileOnly "org.opensearch:protobufs:${versions.opensearchprotobufs}"
     compileOnly (group: 'com.google.guava', name: 'guava', version:"${versions.guava}") {
@@ -269,8 +306,12 @@ dependencies {
     testFixturesCompileOnly (group: 'com.google.guava', name: 'guava', version:"${versions.guava}") {
         exclude group: 'com.google.errorprone', module: 'error_prone_annotations'
     }
-    testFixturesImplementation fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])
-    testImplementation fileTree(dir: knnJarDirectory, include: ["opensearch-knn-${opensearch_build}.jar", "remote-index-build-client-${opensearch_build}.jar"])
+
+    testFixturesImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
+    testImplementation files("${jvectorJarDirectory}/opensearch-jvector-${opensearch_build}.jar")
+    // jvector doesn't bundle commons-lang 2.x, add it explicitly
+    testImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
+    testFixturesImplementation group: 'commons-lang', name: 'commons-lang', version: '2.6'
     testImplementation "org.opensearch.plugin:parent-join-client:${opensearch_version}"
     testImplementation 'org.assertj:assertj-core:3.27.7'
     testImplementation group: 'net.bytebuddy', name: 'byte-buddy', version: "${versions.bytebuddy}"
@@ -297,17 +338,27 @@ task extractKnnJar(type: Copy) {
     into knnJarDirectory
 }
 
-project.tasks.delombok.dependsOn(extractKnnJar)
+// Extract jvector jar for compilation
+task extractJvectorJar(type: Copy) {
+    mustRunAfter()
+    from(zipTree(configurations.zipArchive.find { it.name.startsWith("opensearch-jvector")}))
+    into jvectorJarDirectory
+}
+
+// Set up dependencies for delombok task for JVector engine
+project.tasks.delombok.dependsOn(extractJvectorJar)
 
 compileJava {
-    dependsOn extractKnnJar
+    dependsOn extractJvectorJar
     dependsOn spotlessApply
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 compileTestJava {
+    dependsOn extractJvectorJar
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 compileTestFixturesJava {
+    dependsOn extractJvectorJar
     options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
 }
 
@@ -421,7 +472,7 @@ testClusters.integTest {
         configureSecurityPlugin(testClusters.integTest)
     }
 
-    // Install K-NN/ml-commons plugins on the integTest cluster nodes except security
+    // Install plugins on the integTest cluster
     configurations.zipArchive.asFileTree.each {
         plugin(provider(new Callable<RegularFile>(){
                 @Override
@@ -436,7 +487,7 @@ testClusters.integTest {
         }))
     }
 
-    // This installs our neural-search plugin into the testClusters
+    // Install neural-search plugin
     plugin(project.tasks.bundlePlugin.archiveFile)
     // Cluster shrink exception thrown if we try to set numberOfNodes to 1, so only apply if > 1
     if (_numNodes > 1) numberOfNodes = _numNodes
