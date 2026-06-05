@@ -2,7 +2,7 @@ name: Sync Upstream With Default
 
 on:
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 9 * * 1' # Every Monday at 9am
   workflow_dispatch:
 
 permissions:
