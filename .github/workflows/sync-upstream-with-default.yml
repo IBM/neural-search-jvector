@@ -19,7 +19,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -46,42 +46,40 @@ jobs:
           git push origin $BRANCH_NAME
 
       - name: Step 3 - Create Pull Request to jvector_main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH_NAME: ${{ steps.create_branch.outputs.branch_name }}
-        run: |
-          gh pr create \
-            --base jvector_main \
-            --head "$BRANCH_NAME" \
-            --title "Sync Upstream main to jvector_main" \
-            --label autocut \
-            --body "## Weekly Upstream Sync
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          branch: ${{ steps.create_branch.outputs.branch_name }}
+          base: jvector_main
+          title: "Sync Upstream main to jvector_main"
+          labels: autocut
+          body: |
+            ## Weekly Upstream Sync
 
-          This PR syncs changes from upstream/main into jvector_main.
+            This PR syncs changes from upstream/main into jvector_main.
 
-          ### Process
+            ### Process
 
-          Step 1: Merged \`upstream/main\` into \`neural-search-jvector:main\`
-          Step 2: Created sync branch from \`neural-search-jvector:main\`
+            Step 1: Merged `upstream/main` into `neural-search-jvector:main`
+            Step 2: Created sync branch from `neural-search-jvector:main`
 
-          ### Review Required
+            ### Review Required
 
-          Please review the changes carefully as jvector_main contains additional modifications for the jvector plugin that may conflict with upstream changes.
+            Please review the changes carefully as jvector_main contains additional modifications for the jvector plugin that may conflict with upstream changes.
 
-          ### Checklist
+            ### Checklist
 
-          - [ ] Review all changes for conflicts
-          - [ ] Verify jvector-specific changes are preserved
-          - [ ] Run tests to ensure compatibility
-          - [ ] Update documentation if needed
+            - [ ] Review all changes for conflicts
+            - [ ] Verify jvector-specific changes are preserved
+            - [ ] Run tests to ensure compatibility
+            - [ ] Update documentation if needed
 
-          ### Sync Details
+            ### Sync Details
 
-          - **Source**: \`upstream/main\`
-          - **Target**: \`jvector_main\`
-          - **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          - **Triggered by**: ${{ github.event_name }}
+            - **Source**: `upstream/main`
+            - **Target**: `jvector_main`
+            - **Triggered by**: ${{ github.event_name }}
 
-          ---
+            ---
 
-          *This PR was automatically created by the Sync Upstream With Default workflow.*"
+            *This PR was automatically created by the Sync Upstream With Default workflow.*
