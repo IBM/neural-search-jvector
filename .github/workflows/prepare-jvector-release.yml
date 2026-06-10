@@ -22,7 +22,7 @@ jobs:
         with:
           ref: jvector_main
           fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.PR_TOKEN }}
 
       - name: Add upstream remote and fetch
         run: |

@@ -19,7 +19,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.PR_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -46,13 +46,14 @@ jobs:
           git push origin $BRANCH_NAME
 
       - name: Step 3 - Create Pull Request to jvector_main
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.PR_TOKEN }}
           branch: ${{ steps.create_branch.outputs.branch_name }}
           base: jvector_main
           title: "Sync Upstream main to jvector_main"
           labels: autocut
+          delete-branch: true
           body: |
             ## Weekly Upstream Sync
 
