@@ -33,7 +33,7 @@ jobs:
           
       - name: Add jeeves remote and fetch
         run: |
-          git remote add jeeves git@github.com:ibm-jeeves/neural-search-jvector.git || true
+          git remote add jeeves https://github.com/ibm-jeeves/neural-search-jvector.git || true
 
       - name: Step 1 - Merge upstream into main
         run: |
