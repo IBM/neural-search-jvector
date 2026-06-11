@@ -30,6 +30,10 @@ jobs:
         run: |
           git remote add upstream https://github.com/opensearch-project/neural-search.git || true
           git fetch upstream main
+          
+      - name: Add jeeves remote and fetch
+        run: |
+          git remote add jeeves git@github.com:ibm-jeeves/neural-search-jvector.git || true
 
       - name: Step 1 - Merge upstream into main
         run: |
@@ -43,7 +47,7 @@ jobs:
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           git checkout -b $BRANCH_NAME main
-          git push origin $BRANCH_NAME
+          git push jeeves $BRANCH_NAME
 
       - name: Step 3 - Create Pull Request to jvector_main
         uses: peter-evans/create-pull-request@v8
