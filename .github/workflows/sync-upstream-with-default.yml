@@ -15,11 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.PR_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -30,26 +29,15 @@ jobs:
         run: |
           git remote add upstream https://github.com/opensearch-project/neural-search.git || true
           git fetch upstream main
-          
-      - name: Add jeeves remote and fetch
-        run: |
-          git remote add jeeves https://github.com/ibm-jeeves/neural-search-jvector.git || true
 
-      - name: Step 1 - Merge upstream into main
-        run: |
-          git checkout main
-          git merge upstream/main --no-edit -m "Merge upstream/main into neural-search-jvector:main"
-          git push origin main
-
-      - name: Step 2 - Create sync branch from main
+      - name: Step 1 - Create sync branch from main
         id: create_branch
         run: |
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          git checkout -b $BRANCH_NAME main
-          git push jeeves $BRANCH_NAME
+          git checkout -b $BRANCH_NAME upstream/main
 
-      - name: Step 3 - Create Pull Request to jvector_main
+      - name: Step 2 - Create Pull Request to jvector_main
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.PR_TOKEN }}
@@ -68,8 +56,7 @@ jobs:
 
             ### Process
 
-            Step 1: Merged `upstream/main` into `neural-search-jvector:main`
-            Step 2: Created sync branch from `neural-search-jvector:main`
+            Step 1: Created sync branch from `upstream/main`
 
             ### Review Required
 
