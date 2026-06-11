@@ -54,7 +54,7 @@ jobs:
           title: "Sync Upstream main to jvector_main"
           labels: autocut
           delete-branch: true
-          push-to-fork: IBM-jeeves
+          push-to-fork: ibm-jeeves/neural-search-jvector
           author: IBM-jeeves
           committer: IBM-jeeves
           body: |
