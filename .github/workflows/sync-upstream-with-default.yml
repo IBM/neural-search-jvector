@@ -55,8 +55,8 @@ jobs:
           labels: autocut
           delete-branch: true
           push-to-fork: ibm-jeeves/neural-search-jvector
-          author: IBM-jeeves
-          committer: IBM-jeeves
+          author: IBM-jeeves <bot@ibm.com>
+          committer: IBM-jeeves <bot@ibm.com>
           body: |
             ## Weekly Upstream Sync
 
