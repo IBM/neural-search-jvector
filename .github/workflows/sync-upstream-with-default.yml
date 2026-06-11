@@ -54,6 +54,9 @@ jobs:
           title: "Sync Upstream main to jvector_main"
           labels: autocut
           delete-branch: true
+          push-to-fork: IBM-jeeves
+          author: IBM-jeeves
+          committer: IBM-jeeves
           body: |
             ## Weekly Upstream Sync
 
