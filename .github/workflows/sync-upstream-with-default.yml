@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: jvector_main
           fetch-depth: 0
 
       - name: Configure Git
@@ -35,8 +35,8 @@ jobs:
         run: |
           BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          git checkout -b $BRANCH_NAME origin/main
-          git merge upstream/main
+          git fetch upstream main:main
+          git reset --hard main
 
       - name: Step 2 - Create Pull Request to jvector_main
         uses: peter-evans/create-pull-request@v8
