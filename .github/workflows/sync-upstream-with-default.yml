@@ -50,6 +50,7 @@ jobs:
           push-to-fork: ibm-jeeves/neural-search-jvector
           author: IBM-jeeves <bot@ibm.com>
           committer: IBM-jeeves <bot@ibm.com>
+          signoff: true
           body: |
             ## Weekly Upstream Sync
 
