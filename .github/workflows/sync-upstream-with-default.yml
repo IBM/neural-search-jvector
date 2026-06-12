@@ -37,6 +37,7 @@ jobs:
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           git fetch upstream main:main
           git reset --hard main
+          echo "sha=`git rev-parse HEAD`" >> $GITHUB_OUTPUT
 
       - name: Step 2 - Create Pull Request to jvector_main
         uses: peter-evans/create-pull-request@v8
@@ -73,7 +74,7 @@ jobs:
 
             ### Sync Details
 
-            - **Source**: [`upstream/main`](https://github.com/opensearch-project/neural-search/tree/${{ steps.create_branch.outputs.sha  }})
+            - **Source**: [`upstream/main`](https://github.com/opensearch-project/neural-search/tree/${{ steps.create_branch.outputs.sha }})
             - **Target**: `jvector_main`
             - **Triggered by**: ${{ github.event_name }}
 
@@ -82,18 +83,19 @@ jobs:
             *This PR was automatically created by the Sync Upstream With Default workflow.*
 
         - name: Step 3 - Create sync branch from main
-          id: create_branch
+          id: create_branch_main
           run: |
             BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
             echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
             git fetch upstream main:main
             git reset --hard main
+            echo "sha=`git rev-parse HEAD`" >> $GITHUB_OUTPUT
 
         - name: Step 4 - Create Pull Request to main
           uses: peter-evans/create-pull-request@v8
           with:
             token: ${{ secrets.PR_TOKEN }}
-            branch: ${{ steps.create_branch.outputs.branch_name }}
+            branch: ${{ steps.create_branch_main.outputs.branch_name }}
             base: main
             title: "Sync Upstream main to main"
             labels: autocut
@@ -124,7 +126,7 @@ jobs:
 
               ### Sync Details
 
-              - **Source**: [`upstream/main`](https://github.com/opensearch-project/neural-search/tree/${{ steps.create_branch.outputs.sha  }})
+              - **Source**: [`upstream/main`](https://github.com/opensearch-project/neural-search/tree/${{ steps.create_branch_main.outputs.sha }})
               - **Target**: `main`
               - **Triggered by**: ${{ github.event_name }}
 
