@@ -31,17 +31,17 @@ Repositories create consistent release labels, such as `v1.0.0`, `v1.1.0` and `v
 
 ## Keeping Up With Upstream
 
-This repository maintains synchronization with the upstream OpenSearch neural-search repository. The sync process is automated and runs weekly or can be triggered manually.
+This repository maintains synchronization with the upstream OpenSearch [neural-search](github.com/Opensearch-project/neural-search) repository. The process is automated as Github workflows and runs weekly (or can be triggered manually).
 
-### Automated Sync Workflow
+### Automated Workflow to Sync with `main` branch
 
-The sync workflow runs every Monday at 9am and creates pull requests to merge upstream changes into the fork.
+The workflow runs every Monday at 9am and creates pull requests to merge upstream changes from `main` branch to both `main` and `jvector_main` forks.
 
 **Workflow**: `.github/workflows/sync-upstream-with-default.yml`
 
 **Process**:
-1. Fetches latest changes from upstream main branch
-2. Creates pull requests to sync upstream/main into both main and jvector_main branches
+1. Fetches latest changes from `upstream/main` branch
+2. Creates pull requests to sync `upstream/main` into both `main` and `jvector_main` branches
 3. Pull requests are labeled with `autocut` for easy identification
 
 **Manual Trigger**:
@@ -50,14 +50,13 @@ Navigate to Actions > Sync Upstream With Default > Run workflow
 **Review Requirements**:
 - Review all changes for conflicts
 - Verify jvector-specific changes are preserved
-- Run tests to ensure compatibility
 - Update documentation if needed
 
 ## Releasing
 
 The release process is standard across repositories in this org and is run by a release manager volunteering from amongst [MAINTAINERS](MAINTAINERS.md).
 
-1. **Sync With Upstream**: Ensure the sync workflow has been run and all pull requests are merged into jvector_main
+1. **Sync With Upstream**: Ensure the sync workflow has been run and all pull requests are merged into `jvector_main`
 2. **Check Nightly Benchmark Results**: Review the [nightly benchmark results](https://opensearch.org/benchmarks/) to identify any performance degradation. Address any significant regressions before proceeding
 
 ### Release Workflow
@@ -69,23 +68,20 @@ The release process is standard across repositories in this org and is run by a 
 2. Enter the release version (e.g., 3.7)
 3. The workflow will:
    - Sync the upstream release branch to the fork
-   - Create a jvector release branch from jvector_main
-   - Create a pull request to merge upstream release changes into the jvector release branch
+   - Create a new release branch from `jvector_main`
+   - Create a pull request to merge upstream release changes into the newly created release branch
    - Create a tracking issue with next steps
 
 **Post-Workflow Steps**:
 1. Review and merge the generated pull request
-2. Run tests locally on the release branch
-3. Create and push the release tag
-4. Monitor the auto-release workflow for artifact creation
+2. Create and push the release tag
+3. Monitor the auto-release workflow for artifact creation
 
-**Example**:
+**Checking the release branch locally**:
 ```bash
 # After merging the release PR
 git fetch origin
 git checkout jvector_3.7
-./gradlew spotlessApply
-./gradlew check integTest build
 
 # Create release tag
 git tag v3.7
