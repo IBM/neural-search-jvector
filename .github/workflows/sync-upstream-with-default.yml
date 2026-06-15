@@ -55,7 +55,7 @@ jobs:
           body: |
             ## Weekly Upstream Sync
 
-            This PR syncs changes from upstream/main into jvector_main.
+            This PR syncs changes from `upstream/main` into `jvector_main`.
 
             ### Process
 
@@ -63,7 +63,7 @@ jobs:
 
             ### Review Required
 
-            Please review the changes carefully as jvector_main contains additional modifications for the jvector plugin that may conflict with upstream changes.
+            Please review the changes carefully as `jvector_main` contains additional modifications for the jvector plugin that may conflict with upstream changes.
 
             ### Checklist
 
@@ -107,22 +107,7 @@ jobs:
           body: |
             ## Weekly Upstream Sync
 
-            This PR syncs changes from upstream/main into main.
-
-            ### Process
-
-            Step 1: Created sync branch from `upstream/main`
-
-            ### Review Required
-
-            Please review the changes carefully as jvector_main contains additional modifications for the jvector plugin that may conflict with upstream changes.
-
-            ### Checklist
-
-            - [ ] Review all changes for conflicts
-            - [ ] Verify jvector-specific changes are preserved
-            - [ ] Run tests to ensure compatibility
-            - [ ] Update documentation if needed
+            This PR syncs changes from `upstream/main` into `main`.
 
             ### Sync Details
 
@@ -133,4 +118,3 @@ jobs:
             ---
 
             *This PR was automatically created by the Sync Upstream With Default workflow.*
-
