@@ -133,12 +133,15 @@ jobs:
 
             Once verified and tagged, close this issue.`;
 
-            const issue = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['autocut', 'release'],
-            });
-
-            core.info(`Created issue #${issue.data.number}`);
+            try {
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['autocut', 'release'],
+              });
+              core.info(`Created issue #${issue.data.number}`);
+            } catch (error) {
+              core.warning(`Failed to create issue: ${error.message}`);
+            }
