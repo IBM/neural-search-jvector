@@ -54,7 +54,7 @@ jobs:
         id: create_release_branch
         run: |
           VERSION="${{ inputs.jvector_version }}"
-          RELEASE_BRANCH="release_$VERSION"
+          RELEASE_BRANCH="jvector_$VERSION"
           echo "release_branch=$RELEASE_BRANCH" >> $GITHUB_OUTPUT
 
           # Create release branch from current jvector_main
