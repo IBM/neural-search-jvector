@@ -18,16 +18,15 @@ jobs:
 
     steps:
       - name: Checkout jvector repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: jvector_main
           fetch-depth: 0
-          token: ${{ secrets.PR_TOKEN }}
 
       - name: Add upstream remote and fetch
         run: |
-          git remote add upstream https://github.com/opensearch-project/neural-search.git
-          git fetch upstream --tags
+          git remote add upstream https://github.com/opensearch-project/neural-search.git || true
+          git fetch upstream || true
 
       - name: Find upstream commit for release tag
         id: find_commit
@@ -140,7 +139,6 @@ jobs:
               title: title,
               body: body,
               labels: ['autocut', 'release'],
-              assignees: ['kush992']
             });
 
             core.info(`Created issue #${issue.data.number}`);
