@@ -2,6 +2,7 @@
   "settings": {
     "index": {
       "knn": true,
+      "knn.derived_source.enabled": false,
       "knn.algo_param.ef_search": 100,
       "refresh_interval": "30s",
       "default_pipeline": "%s"
@@ -15,9 +16,9 @@
         "type": "knn_vector",
         "dimension": 768,
         "method": {
-          "name": "hnsw",
+          "name": "disk_ann",
           "space_type": "l2",
-          "engine": "lucene",
+          "engine": "jvector",
           "parameters": {
             "ef_construction": 128,
             "m": 24
@@ -28,9 +29,9 @@
         "type": "knn_vector",
         "dimension": 768,
         "method": {
-          "name": "hnsw",
+          "name": "disk_ann",
           "space_type": "l2",
-          "engine": "lucene",
+          "engine": "jvector",
           "parameters": {
             "ef_construction": 128,
             "m": 24
@@ -41,9 +42,9 @@
         "type": "knn_vector",
         "dimension": 768,
         "method": {
-          "name": "hnsw",
+          "name": "disk_ann",
           "space_type": "l2",
-          "engine": "lucene",
+          "engine": "jvector",
           "parameters": {
             "ef_construction": 128,
             "m": 24
@@ -57,9 +58,9 @@
             "type": "knn_vector",
             "dimension": 768,
             "method": {
-              "name": "hnsw",
+              "name": "disk_ann",
               "space_type": "l2",
-              "engine": "lucene",
+              "engine": "jvector",
               "parameters": {
                 "ef_construction": 128,
                 "m": 24
@@ -72,9 +73,9 @@
         "type": "knn_vector",
         "dimension": 768,
         "method": {
-          "name": "hnsw",
+          "name": "disk_ann",
           "space_type": "l2",
-          "engine": "lucene",
+          "engine": "jvector",
           "parameters": {
             "ef_construction": 128,
             "m": 24
@@ -97,9 +98,9 @@
             "type": "knn_vector",
             "dimension": 768,
             "method": {
-              "name": "hnsw",
+              "name": "disk_ann",
               "space_type": "l2",
-              "engine": "lucene",
+              "engine": "jvector",
               "parameters": {
                 "ef_construction": 128,
                 "m": 24
@@ -118,9 +119,9 @@
                     "type": "knn_vector",
                     "dimension": 768,
                     "method": {
-                      "name": "hnsw",
+                      "name": "disk_ann",
                       "space_type": "l2",
-                      "engine": "lucene",
+                      "engine": "jvector",
                       "parameters": {
                         "ef_construction": 128,
                         "m": 24
