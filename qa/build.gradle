@@ -208,11 +208,19 @@ task unzipBwcPlugin(type: Copy) {
 task pullBwcPlugin {
     doLast {
         delete Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}"), java.nio.file.Path.of(tmp_dir.absolutePath, "opensearch-${neural_search_bwc_version_no_qualifier}-${os_platform}-x64.${file_ext}")
-        ant.get(
-            src: "https://github.com/IBM/neural-search-jvector/releases/download/${opensearch_bwc_build}/opensearch-neural-search-${opensearch_bwc_build}.zip",
-            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${opensearch_bwc_build}.zip"),
-            httpusecaches: false
-        )
+        if (opensearch_bwc_build == "3.6.0.0") {
+	        ant.get(
+	            src: "https://github.com/IBM/neural-search-jvector/releases/download/${opensearch_bwc_build}/opensearch-neural-search-${opensearch_bwc_build}.zip",
+	            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${opensearch_bwc_build}.zip"),
+	            httpusecaches: false
+	        )
+        } else {
+        	ant.get(
+	            src: "https://github.com/IBM/neural-search-jvector/releases/download/${opensearch_bwc_build}/opensearch-neural-search-jvector-${opensearch_bwc_build}.zip",
+	            dest: Path.of(tmp_dir.absolutePath, "opensearch-neural-search-${opensearch_bwc_build}.zip"),
+	            httpusecaches: false
+	        )
+        }
     }
 }
 
