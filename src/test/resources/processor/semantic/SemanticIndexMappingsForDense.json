@@ -1,6 +1,7 @@
 {
   "settings": {
-    "index.knn": true
+    "index.knn": true,
+    "index.knn.derived_source.enabled": false
   },
   "mappings": {
     "properties": {
@@ -15,7 +16,7 @@
             "model_id": "%s",
             "dense_embedding_config": {
               "method": {
-                "engine": "lucene"
+                "engine": "jvector"
               }
             }
           }

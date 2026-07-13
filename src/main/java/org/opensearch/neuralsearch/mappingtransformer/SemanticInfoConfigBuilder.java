@@ -14,6 +14,8 @@ import org.opensearch.ml.common.MLModel;
 import org.opensearch.ml.common.model.MLModelConfig;
 import org.opensearch.ml.common.model.RemoteModelConfig;
 import org.opensearch.ml.common.model.TextEmbeddingModelConfig;
+import org.opensearch.neuralsearch.constants.NeuralSearchConstants;
+
 import reactor.util.annotation.NonNull;
 
 import java.util.HashMap;
@@ -190,6 +192,7 @@ public class SemanticInfoConfigBuilder {
 
         // Safe to override or add new method values
         methodConfig.putIfAbsent(KNN_VECTOR_METHOD_NAME_FIELD_NAME, this.knnMethodName);
+        methodConfig.putIfAbsent(NeuralSearchConstants.KNN_VECTOR_ENGINE_FIELD_NAME, NeuralSearchConstants.DEFAULT_KNN_VECTOR_ENGINE);
         // Always use the one we found from the model config
         methodConfig.put(KNN_VECTOR_METHOD_SPACE_TYPE_FIELD_NAME, this.spaceType);
         config.put(KNN_VECTOR_METHOD_FIELD_NAME, methodConfig);
