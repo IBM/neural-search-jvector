@@ -101,6 +101,11 @@ task testAgainstOldCluster(type: StandaloneRestIntegTestTask) {
     nonInputProperties.systemProperty('tests.rest.cluster', "${-> testClusters."${baseName}".allHttpSocketURI.join(",")}")
     nonInputProperties.systemProperty('tests.clustername', "${-> testClusters."${baseName}".getName()}")
     systemProperty 'tests.security.manager', 'false'
+    if (versionsBelow2_16.any { ext.neural_search_bwc_version.startsWith(it) }){
+        filter {
+            excludeTestsMatching "org.opensearch.neuralsearch.bwc.rolling.HybridSearchWithSearchAfterIT.*"
+        }
+    }
 
     // Excluding stats tests because we introduce this feature in 3.0
     // Excluding semantic highlighting BWC tests because we introduce this feature in 3.0
@@ -177,6 +182,12 @@ task testAgainstOneThirdUpgradedCluster(type: StandaloneRestIntegTestTask) {
     nonInputProperties.systemProperty('tests.clustername', "${-> testClusters."${baseName}".getName()}")
     systemProperty 'tests.security.manager', 'false'
 
+    if (versionsBelow2_16.any { ext.neural_search_bwc_version.startsWith(it) }){
+        filter {
+            excludeTestsMatching "org.opensearch.neuralsearch.bwc.rolling.HybridSearchWithSearchAfterIT.*"
+        }
+    }
+
     // Excluding stats tests because we introduce this feature in 3.0
     // Excluding semantic highlighting BWC tests because we introduce this feature in 3.0
     if (versionsBelow3_0.any { ext.neural_search_bwc_version.startsWith(it) }){
@@ -251,6 +262,11 @@ task testAgainstTwoThirdsUpgradedCluster(type: StandaloneRestIntegTestTask) {
     nonInputProperties.systemProperty('tests.clustername', "${-> testClusters."${baseName}".getName()}")
     systemProperty 'tests.security.manager', 'false'
 
+    if (versionsBelow2_16.any { ext.neural_search_bwc_version.startsWith(it) }){
+        filter {
+            excludeTestsMatching "org.opensearch.neuralsearch.bwc.rolling.HybridSearchWithSearchAfterIT.*"
+        }
+    }
     // Excluding stats tests because we introduce this feature in 3.0
     // Excluding semantic highlighting BWC tests because we introduce this feature in 3.0
     if (versionsBelow3_0.any { ext.neural_search_bwc_version.startsWith(it) }){
@@ -326,6 +342,11 @@ task testRollingUpgrade(type: StandaloneRestIntegTestTask) {
     nonInputProperties.systemProperty('tests.clustername', "${-> testClusters."${baseName}".getName()}")
     systemProperty 'tests.security.manager', 'false'
 
+    if (versionsBelow2_16.any { ext.neural_search_bwc_version.startsWith(it) }){
+        filter {
+            excludeTestsMatching "org.opensearch.neuralsearch.bwc.rolling.HybridSearchWithSearchAfterIT.*"
+        }
+    }
     // Excluding stats tests because we introduce this feature in 3.0
     // Excluding semantic highlighting BWC tests because we introduce this feature in 3.0
     if (versionsBelow3_0.any { ext.neural_search_bwc_version.startsWith(it) }){
