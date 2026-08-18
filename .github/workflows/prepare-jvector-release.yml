@@ -27,28 +27,30 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "IBM-jeeves"
+          git config user.email "bot@ibm.com"
 
-      - name: Add upstream remote and fetch
+      - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/opensearch-project/neural-search.git || true
           git fetch upstream || true
 
-      - name: Step 1 - Sync upstream release branch to fork
+      - name: Step 1 - Sync upstream release branch to IBM org via bot
         id: sync_upstream
         run: |
           # Use the version from argument
           VERSION="${{ inputs.jvector_version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          # Fetch upstream release branch
+          # Fetch upstream release branch locally
           if ! git fetch upstream $VERSION:$VERSION 2>/dev/null; then
             echo "Error: Could not find upstream branch $VERSION"
             exit 1
           fi
 
-          git push origin $VERSION
+          # Push via bot PAT (has workflow scope) so workflow files in the
+          # upstream branch are accepted by GitHub
+          git push https://x-access-token:${{ secrets.PR_TOKEN }}@github.com/${{ github.repository }}.git $VERSION
 
       - name: Step 2 - Create release branch from jvector_main
         id: create_release_branch
@@ -59,7 +61,8 @@ jobs:
 
           # Create release branch from current jvector_main
           git checkout -b $RELEASE_BRANCH jvector_main
-          git push origin $RELEASE_BRANCH
+          # Push via bot PAT so workflow files are accepted
+          git push https://x-access-token:${{ secrets.PR_TOKEN }}@github.com/${{ github.repository }}.git $RELEASE_BRANCH
 
       - name: Step 3 - Create sync branch from upstream release
         id: create_sync_branch
@@ -67,8 +70,11 @@ jobs:
           VERSION="${{ steps.sync_upstream.outputs.version }}"
           BRANCH_NAME="sync-upstream-$VERSION-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          git fetch upstream $VERSION:$VERSION
-          git reset --hard $VERSION
+
+          # Checkout a new branch from the upstream release ref WITHOUT
+          # disturbing the jvector_$VERSION branch created in Step 2.
+          # git reset --hard would have moved that branch pointer to upstream.
+          git checkout -b $BRANCH_NAME $VERSION
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       - name: Step 4 - Create Pull Request to release branch
