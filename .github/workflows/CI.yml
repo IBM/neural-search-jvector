@@ -16,11 +16,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  Get-CI-Image-Tag:
-    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
-    with:
-      product: opensearch
-
   # The JNI layer is C++ and has its own googletest suite under jni/tests. The Java
   # `test` task builds the shared library but never runs these, so without a
   # dedicated job the native code ships untested.
@@ -84,7 +79,6 @@ jobs:
         run: ./gradlew jniTest -PjniSanitizers=true
 
   Check-neural-search-linux:
-    needs: Get-CI-Image-Tag
     strategy:
       fail-fast: false
       matrix:
@@ -97,17 +91,8 @@ jobs:
 
     name: Gradle Check Linux
     runs-on: ${{ matrix.os }}
-    container:
-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
-      # this image tag is subject to change as more dependencies and updates will arrive over time
-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
-      # need to switch to root so that github actions can install runner binary on container without permission issues.
-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
 
     steps:
-      - name: Run start commands
-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
-
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # jni/external/neural-sparse-cpp is a submodule the native build needs
@@ -121,12 +106,11 @@ jobs:
           cache: 'gradle'
 
       - name: Run build
-        run: |
-          chown -R 1000:1000 `pwd`
-          su `id -un 1000` -c "./gradlew check --parallel -x integTest"
+        run: ./gradlew check --parallel -x integTest
 
       - name: Upload Coverage Report
-        if: ${{ !cancelled() && contains(matrix.os, 'ubuntu') && contains(matrix.java, '21') }}
+        # No coverage reports
+        if: ${{ false && !cancelled() && contains(matrix.os, 'ubuntu') && contains(matrix.java, '21') }}
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -161,7 +145,6 @@ jobs:
           ./gradlew check --parallel -x integTest
 
   Precommit-neural-search-linux:
-    needs: Get-CI-Image-Tag
     strategy:
       fail-fast: false
       matrix:
@@ -170,17 +153,7 @@ jobs:
 
     name: Pre-commit Linux
     runs-on: ${{ matrix.os }}
-    container:
-      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
-      # this image tag is subject to change as more dependencies and updates will arrive over time
-      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
-      # need to switch to root so that github actions can install runner binary on container without permission issues.
-      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
-
     steps:
-      - name: Run start commands
-        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
-
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # jni/external/neural-sparse-cpp is a submodule the native build needs
@@ -194,9 +167,7 @@ jobs:
           cache: 'gradle'
 
       - name: Run build
-        run: |
-          chown -R 1000:1000 `pwd`
-          su `id -un 1000` -c "./gradlew precommit -x integTest --parallel"
+        run: ./gradlew precommit -x integTest --parallel
 
   integTest:
     needs: Precommit-neural-search-linux

@@ -90,7 +90,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-import static org.opensearch.knn.common.KNNConstants.MODEL_INDEX_NAME;
+import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_INDEX_NAME;
 import static org.opensearch.neuralsearch.common.VectorUtil.vectorAsListToArray;
 import static org.opensearch.neuralsearch.util.TestUtils.DEFAULT_COMBINATION_METHOD;
 import static org.opensearch.neuralsearch.util.TestUtils.DEFAULT_NORMALIZATION_METHOD;
