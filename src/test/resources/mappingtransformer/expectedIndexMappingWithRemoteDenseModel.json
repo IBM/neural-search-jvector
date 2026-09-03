@@ -11,13 +11,18 @@
             "product_description": {
               "type": "semantic",
               "model_id": "%s",
-              "raw_field_type": "text"
+              "raw_field_type": "text",
+              "dense_embedding_config": {
+                "method": {
+                  "engine": "jvector"
+                }
+              }
             },
             "product_description_semantic_info": {
               "properties": {
                 "embedding": {
                   "type": "knn_vector",
-                  "dimension": 384,
+                  "dimension": 128,
                   "method": {
                     "engine": "jvector",
                     "space_type": "l2",
