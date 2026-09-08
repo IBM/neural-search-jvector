@@ -99,6 +99,30 @@ add_library(${TARGET_LIB_NSPARSE} SHARED $<TARGET_OBJECTS:${TARGET_OBJ_NSPARSE}>
 target_link_libraries(${TARGET_LIB_NSPARSE} PRIVATE ${TARGET_OBJ_NSPARSE})
 set_target_properties(${TARGET_LIB_NSPARSE} PROPERTIES SUFFIX ${LIB_EXT})
 set_target_properties(${TARGET_LIB_NSPARSE} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# nsparse links statically, so the OpenMP runtime is the only dependency that has to
+# travel with the plugin. scripts/build.sh puts it next to this library inside the
+# zip, but System.loadLibrary's java.library.path does not apply to a library's own
+# dependencies -- the dynamic loader resolves those, and without an rpath it would
+# only ever find a system-wide copy. Look beside ourselves first so the shipped copy
+# is the one that gets used.
+if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL Windows)
+    if (APPLE)
+        set(NSPARSE_ORIGIN "@loader_path")
+    else()
+        set(NSPARSE_ORIGIN "$ORIGIN")
+    endif()
+    set_target_properties(${TARGET_LIB_NSPARSE} PROPERTIES BUILD_RPATH "${NSPARSE_ORIGIN}" INSTALL_RPATH "${NSPARSE_ORIGIN}")
+endif()
+
+# The C++ runtime is linked in statically on Linux. ml-commons brings DJL's precxx11
+# PyTorch flavour, which loads its own bundled libstdc++.so.6 into the process; the
+# loader then satisfies our SONAME reference from that copy, and it is older than the
+# toolchain that built us. dlopen fails with "version `GLIBCXX_3.4.32' not found"
+# purely because of load order, and which plugin wins is not something we control.
+if (${CMAKE_SYSTEM_NAME} STREQUAL Linux)
+    target_link_options(${TARGET_LIB_NSPARSE} PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 # ---------------------------------------------------------------------------
 
 # --------------------------------- TESTS -----------------------------------
