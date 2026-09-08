@@ -23,6 +23,7 @@
                 "embedding": {
                   "type": "knn_vector",
                   "dimension": 128,
+                  "doc_values": false,
                   "method": {
                     "engine": "jvector",
                     "space_type": "l2",
