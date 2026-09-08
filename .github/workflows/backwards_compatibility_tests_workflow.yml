@@ -16,6 +16,7 @@ concurrency:
 jobs:
   Restart-Upgrade-BWCTests-NeuralSearch:
     strategy:
+      fail-fast: false
       matrix:
         java: [21, 25]
         os: [ubuntu-latest]
@@ -46,6 +47,7 @@ jobs:
 
   Rolling-Upgrade-BWCTests-NeuralSearch:
     strategy:
+      fail-fast: false
       matrix:
         java: [21, 25]
         os: [ubuntu-latest]
