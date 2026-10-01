@@ -1,0 +1,190 @@
+name: Cut JVector Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      jvector_version:
+        description: 'JVector version (e.g., 3.7)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  issues: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout jvector repository
+        uses: actions/checkout@v6
+        with:
+          ref: jvector_main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/opensearch-project/neural-search.git || true
+          git fetch upstream || true
+
+      - name: Step 1 - Sync upstream release branch to fork
+        id: sync_upstream
+        run: |
+          # Use the version from argument
+          VERSION="${{ inputs.jvector_version }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Fetch upstream release branch
+          if ! git fetch upstream $VERSION:$VERSION 2>/dev/null; then
+            echo "Error: Could not find upstream branch $VERSION"
+            exit 1
+          fi
+
+          git push origin $VERSION
+
+      - name: Step 2 - Create release branch from jvector_main
+        id: create_release_branch
+        run: |
+          VERSION="${{ inputs.jvector_version }}"
+          RELEASE_BRANCH="jvector_$VERSION"
+          echo "release_branch=$RELEASE_BRANCH" >> $GITHUB_OUTPUT
+
+          # Create release branch from current jvector_main
+          git checkout -b $RELEASE_BRANCH jvector_main
+          git push origin $RELEASE_BRANCH
+
+      - name: Step 3 - Create sync branch from upstream release
+        id: create_sync_branch
+        run: |
+          VERSION="${{ steps.sync_upstream.outputs.version }}"
+          BRANCH_NAME="sync-upstream-$VERSION-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          git fetch upstream $VERSION:$VERSION
+          git reset --hard $VERSION
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Step 4 - Create Pull Request to release branch
+        id: create_pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.PR_TOKEN }}
+          branch: ${{ steps.create_sync_branch.outputs.branch_name }}
+          base: ${{ steps.create_release_branch.outputs.release_branch }}
+          title: "Merge upstream/${{ steps.sync_upstream.outputs.version }} into ${{ steps.create_release_branch.outputs.release_branch }}"
+          labels: autocut,release
+          delete-branch: true
+          push-to-fork: ibm-jeeves/neural-search-jvector
+          author: IBM-jeeves <bot@ibm.com>
+          committer: IBM-jeeves <bot@ibm.com>
+          signoff: true
+          body: |
+            ## JVector Release ${{ inputs.jvector_version }} Preparation
+
+            This PR merges upstream release branch `${{ steps.sync_upstream.outputs.version }}` into `${{ steps.create_release_branch.outputs.release_branch }}`.
+
+            ### Process
+
+            1. Synced `upstream/${{ steps.sync_upstream.outputs.version }}` to `origin/${{ steps.sync_upstream.outputs.version }}`
+            2. Created `${{ steps.create_release_branch.outputs.release_branch }}` from `jvector_main`
+            3. Merging upstream release changes into release branch
+
+            ### Review Required
+
+            Please review the changes carefully:
+            - Verify jvector-specific changes are preserved
+            - Check for conflicts with jvector plugin integration
+            - Ensure all tests pass
+
+            ### Next Steps After Merge
+
+            1. Run tests locally:
+               ```bash
+               git fetch origin
+               git checkout ${{ steps.create_release_branch.outputs.release_branch }}
+               ./gradlew spotlessApply
+               ./gradlew check integTest build
+               ```
+
+            2. Create release tag:
+               ```bash
+               git tag v${{ inputs.jvector_version }}
+               git push origin v${{ inputs.jvector_version }}
+               ```
+
+            3. Monitor auto-release workflow for artifact creation
+
+            ### Sync Details
+
+            - **Source**: [`upstream/${{ steps.sync_upstream.outputs.version }}`](https://github.com/opensearch-project/neural-search/tree/${{ steps.create_sync_branch.outputs.sha }})
+            - **Target**: `${{ steps.create_release_branch.outputs.release_branch }}`
+            - **Triggered by**: ${{ github.event_name }}
+
+            ---
+
+            *This PR was automatically created by the Cut JVector Release Branch workflow.*
+
+      - name: Create tracking issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.sync_upstream.outputs.version }}';
+            const releaseBranch = '${{ steps.create_release_branch.outputs.release_branch }}';
+            const prNumber = '${{ steps.create_pr.outputs.pull-request-number }}';
+
+            const title = `JVector Release ${{ inputs.jvector_version }} - Ready for Review`;
+            const body = `## JVector Release ${{ inputs.jvector_version }}
+
+            **Release Branch:** \`${releaseBranch}\`
+            **Upstream Branch:** \`${version}\`
+            **Merge PR:** ${prNumber ? `#${prNumber}` : 'Failed to create'}
+            **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### Status
+
+            - [${version ? 'x' : ' '}] Step 1: Synced upstream/${version} to fork
+            - [${releaseBranch ? 'x' : ' '}] Step 2: Created ${releaseBranch} from jvector_main
+            - [${prNumber ? 'x' : ' '}] Step 3: Created PR to merge upstream/${version} into ${releaseBranch}
+
+            ### Next Steps
+
+            1. **Review and merge PR #${prNumber}** (if created)
+
+            2. **Run tests locally:**
+               \`\`\`bash
+               git fetch origin
+               git checkout ${releaseBranch}
+               ./gradlew spotlessApply
+               ./gradlew check integTest build
+               \`\`\`
+
+            3. **Create release tag:**
+               \`\`\`bash
+               git tag v${{ inputs.jvector_version }}
+               git push origin v${{ inputs.jvector_version }}
+               \`\`\`
+
+            4. **Monitor auto-release workflow** for artifact creation
+
+            Once verified and tagged, close this issue.`;
+
+            try {
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['autocut', 'release'],
+              });
+              core.info(`Created issue #${issue.data.number}`);
+            } catch (error) {
+              core.warning(`Failed to create issue: ${error.message}`);
+            }

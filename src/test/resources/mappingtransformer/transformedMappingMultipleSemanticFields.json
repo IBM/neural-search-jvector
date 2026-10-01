@@ -16,8 +16,9 @@
                 "embedding": {
                   "type": "knn_vector",
                   "method": {
+                    "engine": "jvector",
                     "space_type": "l2",
-                    "name": "hnsw"
+                    "name": "disk_ann"
                   },
                   "dimension": 768
                 },

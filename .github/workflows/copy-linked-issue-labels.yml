@@ -5,7 +5,8 @@ on:
 
 jobs:
   copy-issue-labels:
-    if: github.repository == 'opensearch-project/neural-search'
+    # Not supported at the moment
+    if: false && github.repository == 'opensearch-project/neural-search'
     runs-on: ubuntu-latest
     permissions:
       issues: read

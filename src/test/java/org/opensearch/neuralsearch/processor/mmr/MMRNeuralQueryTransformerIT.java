@@ -26,7 +26,7 @@ import java.util.Map;
 import static org.opensearch.knn.common.KNNConstants.CANDIDATES;
 import static org.opensearch.knn.common.KNNConstants.DIVERSITY;
 import static org.opensearch.knn.common.KNNConstants.MMR;
-import static org.opensearch.knn.common.KNNConstants.MODEL_ID;
+import static org.opensearch.neuralsearch.constants.NeuralSearchConstants.MODEL_ID;
 import static org.opensearch.knn.common.KNNConstants.VECTOR_FIELD_DATA_TYPE;
 import static org.opensearch.knn.common.KNNConstants.VECTOR_FIELD_PATH;
 import static org.opensearch.knn.common.KNNConstants.VECTOR_FIELD_SPACE_TYPE;
@@ -88,6 +88,9 @@ public class MMRNeuralQueryTransformerIT extends BaseNeuralSearchIT {
             .startObject(NeuralQueryBuilder.NAME)
             .startObject(SEMANTIC_FIELD_NAME)
             .field(NeuralQueryBuilder.QUERY_TEXT_FIELD.getPreferredName(), SEMANTIC_DOC_VALUE_1)
+            .startObject("method_parameters")
+            .field("overquery_factor", 20)
+            .endObject()
             .endObject()
             .endObject()
             .endObject()
@@ -111,6 +114,9 @@ public class MMRNeuralQueryTransformerIT extends BaseNeuralSearchIT {
             .startObject(NeuralQueryBuilder.NAME)
             .startObject(SEMANTIC_FIELD_NAME)
             .field(NeuralQueryBuilder.QUERY_TEXT_FIELD.getPreferredName(), SEMANTIC_DOC_VALUE_1)
+            .startObject("method_parameters")
+            .field("overquery_factor", 20)
+            .endObject()
             .endObject()
             .endObject()
             .endObject()
@@ -138,6 +144,9 @@ public class MMRNeuralQueryTransformerIT extends BaseNeuralSearchIT {
             .startObject(SEMANTIC_VECTOR_FIELD_NAME)
             .field(NeuralQueryBuilder.QUERY_TEXT_FIELD.getPreferredName(), SEMANTIC_DOC_VALUE_1)
             .field(MODEL_ID, modelId)
+            .startObject("method_parameters")
+            .field("overquery_factor", 20)
+            .endObject()
             .endObject()
             .endObject()
             .endObject()
@@ -162,6 +171,9 @@ public class MMRNeuralQueryTransformerIT extends BaseNeuralSearchIT {
             .startObject(SEMANTIC_VECTOR_FIELD_NAME)
             .field(NeuralQueryBuilder.QUERY_TEXT_FIELD.getPreferredName(), SEMANTIC_DOC_VALUE_1)
             .field(MODEL_ID, modelId)
+            .startObject("method_parameters")
+            .field("overquery_factor", 20)
+            .endObject()
             .endObject()
             .endObject()
             .endObject()
