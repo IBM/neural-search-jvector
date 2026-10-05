@@ -14,7 +14,7 @@
               "raw_field_type": "text",
               "dense_embedding_config": {
                 "method": {
-                  "engine": "lucene"
+                  "engine": "jvector"
                 }
               }
             },
@@ -23,10 +23,11 @@
                 "embedding": {
                   "type": "knn_vector",
                   "dimension": 128,
+                  "doc_values": false,
                   "method": {
-                    "engine": "lucene",
+                    "engine": "jvector",
                     "space_type": "l2",
-                    "name": "hnsw",
+                    "name": "disk_ann",
                     "parameters": {}
                   }
                 },

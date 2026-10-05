@@ -550,7 +550,7 @@ public class SymmetricRemoteModelIT extends BaseNeuralSearchIT {
                         "model_id": "%s",
                         "dense_embedding_config": {
                           "method": {
-                            "engine": "lucene"
+                            "engine": "jvector"
                           }
                         }
                       },
