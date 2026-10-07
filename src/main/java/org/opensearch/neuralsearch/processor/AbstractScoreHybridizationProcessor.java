@@ -8,10 +8,8 @@ import org.opensearch.action.search.QueryPhaseResultConsumer;
 import org.opensearch.action.search.SearchPhaseContext;
 import org.opensearch.action.search.SearchPhaseName;
 import org.opensearch.action.search.SearchPhaseResults;
-import org.opensearch.neuralsearch.processor.combination.ScoreCombinationFactory;
 import org.opensearch.neuralsearch.processor.combination.ScoreCombinationTechnique;
 import org.opensearch.neuralsearch.processor.normalization.ScoreNormalizationTechnique;
-import org.opensearch.neuralsearch.util.HybridQueryUtil;
 import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.fetch.FetchSearchResult;
 import org.opensearch.search.internal.SearchContext;
@@ -20,7 +18,6 @@ import org.opensearch.search.pipeline.SearchPhaseResultsProcessor;
 import org.opensearch.search.query.QuerySearchResult;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -28,7 +25,6 @@ import java.util.stream.Collectors;
 import com.google.common.annotations.VisibleForTesting;
 import lombok.extern.log4j.Log4j2;
 
-import static org.opensearch.neuralsearch.processor.combination.ScoreCombinationUtil.PARAM_NAME_WEIGHTS;
 import static org.opensearch.neuralsearch.search.util.HybridSearchResultFormatUtil.isHybridQueryStartStopElement;
 
 /**
@@ -99,35 +95,12 @@ public abstract class AbstractScoreHybridizationProcessor implements SearchPhase
             .querySearchResults(querySearchResults)
             .fetchSearchResultOptional(fetchSearchResult)
             .normalizationTechnique(getNormalizationTechnique())
-            .combinationTechnique(resolveCombinationTechnique(searchPhaseContext))
+            .combinationTechnique(getCombinationTechnique())
             .explain(explain)
             .pipelineProcessingContext(requestContextOptional.orElse(null))
             .searchPhaseContext(searchPhaseContext)
             .build();
         getNormalizationWorkflow().execute(request);
-    }
-
-    /**
-     * Resolve the combination technique for this request. Pipeline-created processor instances are shared, so request
-     * weights must produce a fresh technique rather than mutating the configured one. Rebuilding by technique name is
-     * lossless for every current combiner because weights are their only combination parameter; RRF's rank constant is
-     * held by the normalization technique. Classic hybrid remains the only consumer here: fused hybrid self-erases at
-     * coordinator rewrite and uses its own {@code FusionSpec}.
-     */
-    @VisibleForTesting
-    ScoreCombinationTechnique resolveCombinationTechnique(final SearchPhaseContext searchPhaseContext) {
-        ScoreCombinationTechnique configured = getCombinationTechnique();
-        if (Objects.isNull(searchPhaseContext)) {
-            return configured;
-        }
-        Optional<List<Float>> requestWeights = HybridQueryUtil.classicRequestWeights(searchPhaseContext.getRequest());
-        if (requestWeights.isEmpty()) {
-            return configured;
-        }
-        // The factory takes the pipeline definition's shape — a JSON-like map whose weights are doubles — because it is
-        // the one constructor every combiner has; the double round trip is exact for a float.
-        List<Double> weights = requestWeights.get().stream().map(Float::doubleValue).collect(Collectors.toUnmodifiableList());
-        return SCORE_COMBINATION_FACTORY.createCombination(configured.techniqueName(), Map.of(PARAM_NAME_WEIGHTS, weights));
     }
 
     /**

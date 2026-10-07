@@ -37,24 +37,13 @@ import lombok.experimental.Accessors;
 @Accessors(chain = true, fluent = true)
 public final class FusedCoordinatorTimings {
 
-    /**
-     * From the start of the fan-out until the <b>last</b> leg was dispatched: the critical path of resolving the legs to their
-     * coordinator fixpoints ({@code FusedLegResolver}) — a {@code neural} leg's model inference, a {@code neural_sparse} leg's,
-     * a {@code terms} lookup's fetch. Each leg is dispatched the moment it is resolved, so legs with nothing to resolve are
-     * already running during this span; it is elapsed time the other legs overlap with, not time spent resolving alone. Zero
-     * (microseconds) when no leg had anything to resolve, which is every request whose legs are plain lexical or {@code knn}
-     * queries. Before the legs were resolved up front this time was inside {@link #fanOutWaitNanos}, paid by each leg
-     * sub-search's own rewrite — and paid again by round 2 for a leg the Tail carried verbatim.
-     */
-    private long legsResolveWaitNanos;
-
-    /** Building the leg search requests: one source copy per leg, plus the per-leg overrides, summed over the legs. */
+    /** Building the leg MultiSearch request: one source copy per leg, plus the per-leg overrides. */
     private long fanOutBuildNanos;
 
     /**
-     * From the last leg's dispatch until the last leg's response. Elapsed, not additional: the legs' own shard work is inside
-     * it (and, for the legs dispatched earlier, inside {@link #legsResolveWaitNanos} too) and is also reported, per shard, by
-     * the {@code [fused:hybrid_N.leg_M]} entries. It is the wait, not a cost to add to them.
+     * Dispatching the leg MultiSearch and waiting for it. Elapsed, not additional: the legs' own shard work is inside it
+     * and is also reported, per shard, by the {@code [fused:hybrid_N.leg_M]} entries. It is the wait, not a cost to add to
+     * them.
      */
     private long fanOutWaitNanos;
 
@@ -139,8 +128,8 @@ public final class FusedCoordinatorTimings {
         return windowMergeNanos + fuseScoresNanos + rankWindowNanos + substituteBuildNanos;
     }
 
-    /** The whole coordinator span for this hybrid: resolving the legs, building the fan-out, waiting on it, and fusing what came back. */
+    /** The whole coordinator span for this hybrid: building the fan-out, waiting on it, and fusing what came back. */
     public long totalNanos() {
-        return legsResolveWaitNanos + fanOutBuildNanos + fanOutWaitNanos + unionCountWaitNanos + fusionNanos();
+        return fanOutBuildNanos + fanOutWaitNanos + unionCountWaitNanos + fusionNanos();
     }
 }
