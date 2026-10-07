@@ -21,6 +21,7 @@ import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.TotalHits;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchStatusException;
+import org.opensearch.action.search.MultiSearchRequest;
 import org.opensearch.action.search.MultiSearchResponse;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
@@ -34,7 +35,6 @@ import org.opensearch.index.query.BoolQueryBuilder;
 import org.opensearch.index.query.IdsQueryBuilder;
 import org.opensearch.index.query.InnerHitContextBuilder;
 import org.opensearch.index.query.MatchNoneQueryBuilder;
-import org.opensearch.index.query.NestedQueryBuilder;
 import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.knn.index.query.KNNQueryBuilder;
 import org.opensearch.neuralsearch.fusion.CoordinatorScoreFusion;
@@ -139,6 +139,30 @@ final class HybridFusionOrchestrator {
      */
     static final float MIN_RANKED_SCORE = 1e-30f;
 
+    /**
+     * Build the leg MultiSearch: one standalone search per sub-query, each reduced to the global top-{@code windowSize}.
+     *
+     * <p>What each leg inherits from the user's request is decided in exactly one place — {@link CandidateScope}, which
+     * classifies every field of {@link SearchRequest} and {@link SearchSourceBuilder} as propagated, overridden,
+     * rejected, Tail-forcing, or deliberately dropped, with the reason recorded next to it. This method only assembles
+     * the per-leg requests it produces; it holds no propagation policy of its own, so no request field can reach a leg
+     * (or fail to) by omission here.
+     *
+     * <p>Note on ANN legs: {@code size} sets how many hits a leg returns, but an ANN leg's retrieval depth is bounded by
+     * its own {@code k} (collected per shard), not by {@code size} — a {@code knn}/{@code neural} leg with a small or
+     * default {@code k} (10) contributes at most that many candidates regardless of {@code windowSize}. This matches
+     * classic hybrid, which likewise never rewrites {@code k}; for a full window, set {@code k >= window_size} on the
+     * sub-query. We deliberately do NOT rewrite {@code k} here — it would diverge from classic and has no analog for
+     * radial knn ({@code min_score}/{@code max_distance} have no {@code k}).
+     */
+    static MultiSearchRequest buildLegMultiSearch(CandidateScope scope, List<QueryBuilder> legs, int windowSize) {
+        MultiSearchRequest multiSearchRequest = new MultiSearchRequest();
+        for (QueryBuilder leg : legs) {
+            multiSearchRequest.add(scope.newLegRequest(leg, windowSize));
+        }
+        return multiSearchRequest;
+    }
+
     // ---- hits.total from round 1: one count-only round over the legs' disjunction ----
 
     /**
@@ -224,20 +248,14 @@ final class HybridFusionOrchestrator {
      * the first request of each {@code _source} shape per coordinator node, and a request over the fetch budget. Each of
      * those keeps the Tail and counts with it, exactly as before this optimization existed.
      *
-     * <p>Two leg shapes are still refused for cost even armed. {@link #legInTailForm} replaces a {@code knn}/{@code neural}/
+     * <p>One leg shape is still refused even armed. {@link #legInTailForm} replaces a {@code knn}/{@code neural}/
      * {@code neural_knn} leg the window did <em>not</em> truncate with an address of the hits it returned, so the Tail
-     * neither walks its graph nor runs it again. For {@code knn}/{@code neural_knn} the re-execution is one graph walk,
-     * which armed buys away a round trip and is worth it (measured: {@code +4 ms} allowing it against {@code +8 ms}
-     * refusing) — and since the legs arrive resolved ({@code FusedLegResolver}), a {@code neural} leg against a k-NN field
-     * is a {@code neural_knn} carrying its vector by the time it is weighed here. For a leg that is still {@code neural} the
-     * re-execution may be a second <b>model inference</b> — see {@link #carriesInference} — which against a remote connector
-     * is a network call, per-call spend and another throttle path, so that one is refused. A {@code k} large enough to fill
-     * the window cannot be assumed instead: a shard holding fewer documents than {@code k}, a {@code knn} {@code filter}, a
-     * small corpus, and radial knn (which has no {@code k} at all) all come back short.
-     *
-     * <p>The other is a leg that is or holds a fused hybrid ({@link HybridQueryBuilder#countFusedLegSearches}): the count
-     * is a search of its own, where that hybrid would run its fan-out again, while the Tail reads only its match set
-     * ({@code MatchSetRewriteContext}).
+     * neither walks its graph nor re-runs its inference. For {@code knn}/{@code neural_knn} the re-execution is one graph
+     * walk, which armed buys away a round trip and is worth it (measured: {@code +4 ms} allowing it against {@code +8 ms}
+     * refusing). For {@code neural} it is a second <b>model inference</b> — see {@link #carriesInference} — which against a
+     * remote connector is a network call, per-call spend and another throttle path, so that one is refused. A {@code k}
+     * large enough to fill the window cannot be assumed instead: a shard holding fewer documents than {@code k}, a
+     * {@code knn} {@code filter}, a small corpus, and radial knn (which has no {@code k} at all) all come back short.
      *
      * <p><b>What it buys beyond cost.</b> Core computes the value <em>and the relation</em>, so the threshold-boundary
      * arithmetic this class otherwise does by hand cannot be wrong here; and with no aggregation in the request there is
@@ -265,7 +283,7 @@ final class HybridFusionOrchestrator {
             return null;
         }
         // Two or more legs, and no more than the fan-out this is worth doing for. Every leg shape is eligible; the
-        // per-leg loops below refuse the two cases where the Tail is cheaper than the count.
+        // per-leg loop below refuses the one case where the Tail is cheaper than the count.
         if (items.length != legs.size() || legs.size() < 2 || legs.size() > MAX_LEGS_FOR_UNION_COUNT) {
             return null;
         }
@@ -279,13 +297,8 @@ final class HybridFusionOrchestrator {
         }
         for (QueryBuilder leg : legs) {
             // A named leg, or a leg that cannot be nested at all, is refused: the disjunction would register a name the
-            // count never reports, and a hybrid without fusion is illegal anywhere but the root query. So is a leg that is
-            // or holds a fused hybrid: the count is a search of its own, where that hybrid would run its fan-out again,
-            // while the Tail reads only its match set (MatchSetRewriteContext).
-            if (carriesQueryName(leg)
-                || leg instanceof HybridQueryBuilder
-                || leg instanceof HybridFusionQueryBuilder
-                || HybridQueryBuilder.countFusedLegSearches(leg) > 0) {
+            // count never reports, and a hybrid is illegal anywhere but the root query.
+            if (carriesQueryName(leg) || leg instanceof HybridQueryBuilder || leg instanceof HybridFusionQueryBuilder) {
                 return null;
             }
         }
@@ -301,24 +314,21 @@ final class HybridFusionOrchestrator {
             if (Objects.isNull(own) || own.relation() != TotalHits.Relation.EQUAL_TO || own.value() >= threshold) {
                 return null;
             }
-            // A leg the Tail materializes (eligibleForMaterialization and isMaterializableLeg) that the window did NOT truncate
-            // is one the Tail does not re-execute: legInTailForm replaces it with an address of the hits it returned, so the
-            // Tail neither walks its graph nor runs it again, while the disjunction below would do both. Everything reaching
-            // here is armed (the gate above), so what remains is the
-            // one re-execution that is not a local walk: a `neural` leg that still carries its MODEL INFERENCE. The legs
-            // arrive here resolved (FusedLegResolver runs ahead of the fan-out), so the common `neural` leg is a `neural_knn`
-            // with its vector and costs one graph walk like `knn` — which armed is worth paying (measured on WANDS: +4 ms
-            // allowing against +8 ms refusing, because settling the total makes round 2 a match_none and buys back its query
-            // AND its page fetch). What carriesInference still names is the leg that stayed `neural` through resolution: the
-            // name does not prove its vector is held (see that method), and against a remote connector a second inference
-            // is a network call, per-call spend and a second chance to throttle — categorically unlike a graph walk — so
-            // that one is refused rather than guessed about.
+            // A leg the window did NOT truncate is the one leg the Tail does not re-execute: legInTailForm replaces it with
+            // an address of the hits it returned, so the Tail neither walks its graph nor re-runs its inference, while the
+            // disjunction below would do both. Everything reaching here is armed (the gate above), so what remains is the
+            // one re-execution that is not a local walk: a `neural` leg re-runs MODEL INFERENCE, because the count's copy of
+            // the leg is the ORIGINAL builder, whose vectorSupplier is still null (rewriteQueryAgainstKnnField returns a NEW
+            // builder holding the SetOnce), so rewriting the count re-enters the inference branch and calls the model a
+            // second time; MLCommonsClientAccessor caches model metadata, not embeddings. Against a remote connector that is
+            // a network call, per-call spend and a second chance to throttle — categorically unlike the graph walk a short
+            // knn / neural_knn leg costs, which armed is worth paying (measured on WANDS: +4 ms allowing against +8 ms
+            // refusing, because settling the total makes round 2 a match_none and buys back its query AND its page fetch).
             //
             // The window test is what makes this "short": a leg that FILLED the window is served whether or not it carries
-            // inference, because there the Tail keeps it verbatim and re-executes it exactly as the count would, so refusing
-            // would buy nothing. carriesInference implies that a short leg is materialized: a leg still named `neural` is
-            // eligible whatever it was written as (eligibleForMaterialization) and is a materializable shape, so naming
-            // the narrower test alone is the whole condition.
+            // inference, because there the Tail keeps it verbatim and re-executes — and re-infers — exactly as the count
+            // would, so refusing would buy nothing. carriesInference implies isMaterializableLeg (only `neural` carries it,
+            // and it is one of the three materializable names), so naming the narrower test alone is the whole condition.
             if (carriesInference(legs.get(leg)) && item.getResponse().getHits().getHits().length < windowSize) {
                 return null;
             }
@@ -331,9 +341,6 @@ final class HybridFusionOrchestrator {
         // dropping anything else — so it is available here from the responses alone, with no fusion and none of its timing
         // or explanation side effects. Checked last because it reads every leg's hits, which the loop above has just
         // established are there.
-        //
-        // The two later bounds are conservative since FusedRankedPageTrimmer, and move together with the page bound in
-        // decideFastPathAfterLegs (see there for why); this test is their before-the-count form.
         int rankedCount = rankedCountFromLegs(items, windowSize);
         // Nothing fused: round 2 is a match_none either way and buildSubstitute returns before it reads a count, so issuing
         // one would be a distributed round for nothing. Reachable without the page test catching it, because a size: 0
@@ -438,37 +445,6 @@ final class HybridFusionOrchestrator {
         HybridQueryBuilder originalQuery,
         FusedTotalHitsMerger.TotalHitsConsumer totalHitsConsumer
     ) {
-        return buildFusedQuery(
-            source,
-            multiSearchResponse,
-            legs,
-            legs,
-            fusion,
-            windowSize,
-            timings,
-            explanations,
-            originalQuery,
-            totalHitsConsumer
-        );
-    }
-
-    /**
-     * As above, with {@code writtenLegs} the legs as the user wrote them, in the order of {@code legs}, which are their
-     * resolved forms ({@code FusedLegResolver}). Whether a leg may be materialized is read off the written one
-     * ({@link #eligibleForMaterialization}). The overloads above pass {@code legs} for both.
-     */
-    static QueryBuilder buildFusedQuery(
-        SearchSourceBuilder source,
-        MultiSearchResponse multiSearchResponse,
-        List<QueryBuilder> writtenLegs,
-        List<QueryBuilder> legs,
-        FusionSpec fusion,
-        int windowSize,
-        FusedCoordinatorTimings timings,
-        FusedDocExplanations explanations,
-        HybridQueryBuilder originalQuery,
-        FusedTotalHitsMerger.TotalHitsConsumer totalHitsConsumer
-    ) {
         MultiSearchResponse.Item[] items = multiSearchResponse.getResponses();
         long windowMergeStart = System.nanoTime();
         SearchHit[][] legHits = groupLegHits(items, legs.size());
@@ -480,7 +456,7 @@ final class HybridFusionOrchestrator {
         // profiled request's report of its unprofiled twin still needs what the legs decided, read off the same answers the
         // twin would have had.
         decideFastPathAfterLegs(timings.fastPath(), source, items, ranked, windowSize, null);
-        return buildSubstitute(source, items, legHits, ranked, writtenLegs, legs, windowSize, timings, originalQuery, totalHitsConsumer);
+        return buildSubstitute(source, items, legHits, ranked, legs, windowSize, timings, originalQuery, totalHitsConsumer);
     }
 
     /**
@@ -499,16 +475,12 @@ final class HybridFusionOrchestrator {
      * applied below. A count is only issued when every leg came back {@code EQUAL_TO} and below the threshold, which is
      * also what makes {@link #totalHitsFromLegs} return {@code null}, so the Tail is kept and the consumer told nothing
      * was derived either way.
-     *
-     * <p>{@code writtenLegs} are the legs as the user wrote them and {@code legs} their resolved forms, in the same order;
-     * see {@link #eligibleForMaterialization}.
      */
     private static QueryBuilder buildSubstitute(
         SearchSourceBuilder source,
         MultiSearchResponse.Item[] items,
         SearchHit[][] legHits,
         RankedDocs ranked,
-        List<QueryBuilder> writtenLegs,
         List<QueryBuilder> legs,
         int windowSize,
         FusedCoordinatorTimings timings,
@@ -529,7 +501,7 @@ final class HybridFusionOrchestrator {
         if (tailNeeded
             && Objects.nonNull(totalHitsConsumer)
             && onlyTotalsNeedTheTail(source, ranked.ids().length)
-            && namedAnnLegFilledTheWindow(writtenLegs, legs, legHits, windowSize) == false) {
+            && namedAnnLegFilledTheWindow(legs, legHits, windowSize) == false) {
             derivedTotalHits = totalHitsFromLegs(source, legTotalHits(items), windowSize);
             // Floored against the page, so a total can never come back below what round 2 is about to return. Defensive at
             // this call: a leg-derived total is always {threshold, gte} with the threshold above the window, hence above
@@ -542,12 +514,6 @@ final class HybridFusionOrchestrator {
             totalHitsConsumer.accept(derivedTotalHits);
         }
         timings.tailBuilt(tailNeeded);
-        // A post_filter rides on every leg request (CandidateScope#newLegRequest), so a leg's hits are its match set cut to
-        // the filter. Round 2 cuts its hits and hits.total to the same filter, so only aggregations, computed before it,
-        // need the rest of the match set; for them legInTailForm keeps such a leg as the real query.
-        boolean legsPostFiltered = Objects.nonNull(source)
-            && Objects.nonNull(source.postFilter())
-            && Objects.nonNull(source.aggregations());
         // The two leg lists are alternatives, never both populated: an executed Tail converts every leg on the shard and so
         // registers the names itself, and only when it is absent does anything have to be carried for registration alone.
         // inner_hits are registered from the legs themselves, independent of whether the Tail executes them.
@@ -555,9 +521,9 @@ final class HybridFusionOrchestrator {
             ranked.ids(),
             ranked.indices(),
             ranked.scores(),
-            tailNeeded ? legQueriesForTail(writtenLegs, legs, legHits, items, windowSize, legsPostFiltered) : List.of(),
+            tailNeeded ? legQueriesForTail(legs, legHits, windowSize) : List.of(),
             innerHitsLegs(legs),
-            tailNeeded ? List.of() : namedLegsForRegistration(writtenLegs, legs, legHits, items, windowSize, legsPostFiltered),
+            tailNeeded ? List.of() : namedLegsForRegistration(legs, legHits),
             originalQuery
         );
         timings.substituteBuildNanos(System.nanoTime() - substituteBuildStart);
@@ -616,12 +582,9 @@ final class HybridFusionOrchestrator {
     }
 
     /**
-     * Assert the property everything downstream relies on: every leg hit carries its {@code _index} and its {@code _id}.
-     * Fusion keys documents by {@code _index} + {@code _id} and round 2 addresses them the same way, so a hit without an
-     * index can neither be kept apart from a same-{@code _id} document in a sibling index nor addressed without also
-     * matching it, and hits without an {@code _id} would all share one key. {@code CandidateScope} refuses
-     * {@code stored_fields: "_none_"}, the one request shape that builds such hits, so this guards the invariant rather than
-     * a reachable case.
+     * Assert the property everything downstream relies on: every leg hit carries its {@code _index}. Fusion keys documents
+     * by {@code _index} + {@code _id} and round 2 addresses them the same way, so a hit without an index can neither be
+     * kept apart from a same-{@code _id} document in a sibling index nor addressed without also matching it.
      *
      * <p>An {@link IllegalStateException} rather than a fallback, on both counts: a coordinator sets a hit's index from its
      * shard target, so a hit missing one means the leg response was not produced the way a search response is; and the only
@@ -630,16 +593,14 @@ final class HybridFusionOrchestrator {
      */
     private static SearchHit[] requireHitsCarryTheirIndex(final SearchHit[] hits, final int leg) {
         for (SearchHit hit : hits) {
-            if (Objects.isNull(hit.getIndex()) || Objects.isNull(hit.getId())) {
+            if (Objects.isNull(hit.getIndex())) {
                 throw new IllegalStateException(
                     String.format(
                         Locale.ROOT,
-                        "[hybrid] fused-mode sub-query %d returned a hit [_index: %s, _id: %s] with no %s; fused documents are "
+                        "[hybrid] fused-mode sub-query %d returned a hit [_id: %s] with no [_index]; fused documents are "
                             + "identified and addressed by [_index] plus [_id], so this hit cannot be fused",
                         leg,
-                        hit.getIndex(),
-                        hit.getId(),
-                        Objects.isNull(hit.getIndex()) ? "[_index]" : "[_id]"
+                        hit.getId()
                     )
                 );
             }
@@ -902,11 +863,9 @@ final class HybridFusionOrchestrator {
      * outside the window matches only the non-scoring {@code filter}, so it scores {@code 0.0} and sorts below the window.
      * A ranked document whose fused score is exactly {@code 0.0} collapses that distinction: it ties with the Tail-only
      * documents it is supposed to outrank, and the tie is then broken by Lucene doc id, so a document fusion deliberately
-     * did not rank can come back ahead of one it did. Where {@code FusedRankedPageTrimmer} keeps the page to the ranking,
-     * that document is dropped from the page instead, but only after taking the slot: the page comes back short while
-     * ranked documents remain, which a client reads as the end of the results. {@code rescore} does not cause this but
-     * sharpens it — core rescores the shard's top {@code window_size} documents <i>by score</i>, so a tied ranked document
-     * can be left out of a rescore window that a Tail-only document is admitted to, and then lifted past it.
+     * did not rank can come back ahead of one it did. {@code rescore} does not cause this but sharpens it — core rescores
+     * the shard's top {@code window_size} documents <i>by score</i>, so a tied ranked document can be left out of a rescore
+     * window that a Tail-only document is admitted to, and then lifted past it.
      *
      * <p>Exactly {@code 0.0} is reachable, not hypothetical, and two independent paths produce it:
      * <ul>
@@ -966,64 +925,30 @@ final class HybridFusionOrchestrator {
     }
 
     /** The sub-query legs in their Tail form. groupLegHits fails fast on any leg failure, so every leg is present here
-     *  (legHits.length == legs.size(), no null slots). The legs are the RESOLVED builders the fan-out ran (FusedLegResolver),
-     *  so a leg carried verbatim below re-executes what round 1 executed and resolves nothing again. A kNN/neural leg
-     *  retrieves a bounded candidate set rather than a term-defined one, so — when the window did not truncate it — it is
-     *  materialized as the documents it already retrieved rather than re-walking the HNSW graph in the Tail purely to count;
-     *  other legs are used as-is. Which legs may be materialized is read off {@code writtenLegs}, the same legs as the user
-     *  wrote them ({@link #eligibleForMaterialization}). See {@link #isMaterializableLeg} for why the type alone is not
-     *  enough. */
-    private static List<QueryBuilder> legQueriesForTail(
-        List<QueryBuilder> writtenLegs,
-        List<QueryBuilder> legs,
-        SearchHit[][] legHits,
-        MultiSearchResponse.Item[] items,
-        int windowSize,
-        boolean legsPostFiltered
-    ) {
+     *  (legHits.length == legs.size(), no null slots). A kNN/neural leg retrieves a bounded candidate set rather than a
+     *  term-defined one, so — when the window did not truncate it — it is materialized as the documents it already
+     *  retrieved rather than re-walking the HNSW graph in the Tail purely to count; other legs are used as-is. See
+     *  {@link #isMaterializableLeg} for why the type alone is not enough. */
+    private static List<QueryBuilder> legQueriesForTail(List<QueryBuilder> legs, SearchHit[][] legHits, int windowSize) {
         List<QueryBuilder> tail = new ArrayList<>(legs.size());
         for (int legIndex = 0; legIndex < legs.size(); legIndex++) {
-            tail.add(
-                legInTailForm(
-                    legs.get(legIndex),
-                    eligibleForMaterialization(writtenLegs, legs, legIndex),
-                    legHits[legIndex],
-                    items[legIndex],
-                    windowSize,
-                    legsPostFiltered
-                )
-            );
+            tail.add(legInTailForm(legs.get(legIndex), legHits[legIndex], windowSize));
         }
         return tail;
     }
 
     /**
      * One leg in its Tail form: itself, or — for a kNN/neural leg the window did not truncate — a direct address of the
-     * hits it already returned. {@code eligible} is {@link #eligibleForMaterialization} for the leg; a leg that is not
-     * eligible is always itself.
+     * hits it already returned.
      *
      * <p>The Tail is a {@code filter}, so it <i>is</i> the match set {@code total_hits} and every aggregation are computed
      * from, and an address of the returned hits stands for the real match set only when the leg returned all of it. That is
-     * decidable from the response: {@code newLegRequest} caps every leg at {@code size = window_size}, so a leg that came
-     * back with fewer hits than the window was not truncated by the window — while one that filled the window may have
-     * matched documents it never returned, and is therefore kept as the real query and counted properly. Two other things
-     * trim what a leg returns below its match set. One is a {@code post_filter}, which {@code newLegRequest} propagates to
-     * the leg, so the leg's hits are its match set <i>intersected with the filter</i>. Round 2 applies the same filter to its
-     * hits and {@code total_hits}, and inside the filter an address of those hits matches what the leg matches. Its
-     * aggregations are computed before the filter, so {@code postFiltered} is set for a request with aggregations only, and
-     * the leg is then kept as the real query. The other is a leg that did not answer completely (timed out, lost a shard
-     * under {@code allow_partial_search_results}, terminated early), whose hits are a subset of unknown size; it is always
-     * kept as the real query.
+     * decidable from the response alone: {@code newLegRequest} caps every leg at {@code size = window_size}, so a leg that
+     * came back with fewer hits than the window was not truncated and the address is exact — while one that filled the
+     * window may have matched documents it never returned, and is therefore kept as the real query and counted properly.
      */
-    private static QueryBuilder legInTailForm(
-        QueryBuilder leg,
-        boolean eligible,
-        SearchHit[] hits,
-        MultiSearchResponse.Item item,
-        int windowSize,
-        boolean postFiltered
-    ) {
-        if (eligible == false || hits.length >= windowSize || postFiltered || legAnsweredCompletely(item) == false) {
+    private static QueryBuilder legInTailForm(QueryBuilder leg, SearchHit[] hits, int windowSize) {
+        if (hits.length >= windowSize) {
             return leg;
         }
         return legMaterializedIfWorthIt(leg, hits);
@@ -1058,38 +983,18 @@ final class HybridFusionOrchestrator {
      * shard-side {@code toQuery} conversion — compiling a query a Top-only request would otherwise never compile — for no
      * reporting benefit.
      *
-     * <p>An eligible ({@link #eligibleForMaterialization}) ANN leg ({@link #isAnnLeg}) is materialized here <b>whether or not
-     * the window truncated it</b>, which is where this path parts from {@link #legInTailForm}. Nothing counts on it: the Tail
-     * is absent by construction, so what a substitute addresses cannot reach {@code total_hits} or an aggregation bucket, and
-     * the reporting bound a materialized ANN name already carries (the documents the leg returned — its match set <i>is</i>
-     * its top-{@code k}) is the same either way. Applying the Tail's truncation test here would buy a shard-side ANN compile
-     * for a reporting field alone.
-     *
-     * <p>A {@code neural_sparse} leg a {@code neural} leg resolved to is different: its match set is every document holding a
-     * query token, so an address of what it returned stands for that set only when it returned all of it. It takes the
-     * Tail's own form here ({@link #legInTailForm}): materialized when short, carried as the real query — resolved, so no
-     * inference — when it filled the window, so a page document it matched but never returned still gets its
-     * {@code matched_queries} entry. Every other leg takes the Tail's form too, and for a leg that is not eligible, such as a
-     * {@code neural_sparse} or {@code nested} leg the user wrote, that form is the leg itself.
+     * <p>An ANN leg is materialized here <b>whether or not the window truncated it</b>, which is where this path parts from
+     * {@link #legInTailForm}. Nothing counts on it: the Tail is absent by construction, so what a substitute addresses
+     * cannot reach {@code total_hits} or an aggregation bucket, and the reporting bound a materialized name already carries
+     * (the documents the leg returned) is the same either way. Applying the Tail's truncation test here would buy a
+     * shard-side ANN compile — and, for {@code neural}, a second inference — for a reporting field alone.
      */
-    private static List<QueryBuilder> namedLegsForRegistration(
-        List<QueryBuilder> writtenLegs,
-        List<QueryBuilder> legs,
-        SearchHit[][] legHits,
-        MultiSearchResponse.Item[] items,
-        int windowSize,
-        boolean legsPostFiltered
-    ) {
+    private static List<QueryBuilder> namedLegsForRegistration(List<QueryBuilder> legs, SearchHit[][] legHits) {
         List<QueryBuilder> namedLegs = new ArrayList<>();
         for (int legIndex = 0; legIndex < legs.size(); legIndex++) {
             QueryBuilder leg = legs.get(legIndex);
             if (carriesQueryName(leg)) {
-                boolean eligible = eligibleForMaterialization(writtenLegs, legs, legIndex);
-                namedLegs.add(
-                    eligible && isAnnLeg(leg)
-                        ? legMaterializedIfWorthIt(leg, legHits[legIndex])
-                        : legInTailForm(leg, eligible, legHits[legIndex], items[legIndex], windowSize, legsPostFiltered)
-                );
+                namedLegs.add(legMaterializedIfWorthIt(leg, legHits[legIndex]));
             }
         }
         return namedLegs;
@@ -1098,25 +1003,13 @@ final class HybridFusionOrchestrator {
     /**
      * Whether a leg carries a query name, at any depth.
      *
-     * <p><b>Deliberately over-inclusive.</b> The rendered form is checked rather than a {@code visit(QueryBuilderVisitor)}
-     * walk, which does not reach every child: {@code function_score} does not visit its functions' filters, {@code boosting}
-     * and {@code script_score} hand the visitor their inner query but not its children, and {@code neural_knn},
-     * {@code wrapper} and {@code template} do not override {@code visit}. A render includes every child a builder prints,
-     * and core's builders other than {@code wrapper} and {@code template} print their {@code _name} through
-     * {@link AbstractQueryBuilder#printBoostAndQueryName}. So the check holds only while every builder a resolved leg can
-     * hold prints the {@code _name} it carries — {@code neural_knn} included, which prints the one core's rewrite copies
-     * onto it from a {@code neural} query ({@link NeuralKNNQueryBuilder#doXContent}). A false positive — a leg querying a
-     * field literally called {@code _name} — costs one carried leg whose registration nobody reads; a false negative
-     * silently drops the name from {@code matched_queries}.
-     *
-     * <p>Cost note: the legs asked about after the fan-out are the resolved ones ({@code FusedLegResolver}), so for an
-     * <i>unnamed</i> {@code neural} leg the render now includes the vector it resolved to (a few kilobytes of JSON for a
-     * 768-dimension model) where it used to include the query text. Tens of microseconds per unnamed ANN leg per request,
-     * at most a few times. A {@code neural_knn} that carries a boost or a {@code _name}, which core's rewrite copies from a
-     * {@code neural} leg, costs more: its render converts its inner {@code knn}'s render to a map and writes that map out
-     * ({@link NeuralKNNQueryBuilder#doXContent}). It is not short-circuited because a {@code knn} leg's {@code filter} is
-     * exactly where a nested {@code _name} hides. Render only the filter of a {@code knn}/{@code neural_knn} leaf if this
-     * ever shows in a profile.
+     * <p><b>Deliberately over-inclusive.</b> There is no exact generic descent available: of all the core query builders
+     * only {@code bool} overrides {@code visit(QueryBuilderVisitor)}, so a visitor walk (like a shallow
+     * {@code queryName() != null} check) is blind to a {@code _name} under {@code nested}, {@code function_score},
+     * {@code dis_max}, {@code constant_score} or a {@code knn} filter. The rendered form is checked instead, where
+     * {@link AbstractQueryBuilder#printBoostAndQueryName} puts {@code _name} whenever one is set. A false positive — a leg
+     * querying a field literally called {@code _name} — costs one carried leg whose registration nobody reads; a false
+     * negative would silently drop the field, which is the defect being fixed.
      */
     private static boolean carriesQueryName(QueryBuilder leg) {
         return Objects.nonNull(leg.queryName()) || rendersQueryName(leg);
@@ -1128,7 +1021,7 @@ final class HybridFusionOrchestrator {
         try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
             leg.toXContent(builder, ToXContent.EMPTY_PARAMS);
             return builder.toString().contains(QUERY_NAME_KEY);
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException e) {
             // A leg that cannot be rendered is one whose names cannot be ruled out. Carry it: an extra registration is
             // cheap, and the alternative is exactly the silent loss this method exists to prevent.
             return true;
@@ -1170,91 +1063,36 @@ final class HybridFusionOrchestrator {
     }
 
     /**
-     * Whether a leg may be materialized at all, decided from the leg as the user wrote it: a {@code knn}, {@code neural} or
-     * {@code neural_knn} leg, the names the Tail materialized before the legs were resolved ahead of the fan-out
-     * ({@code FusedLegResolver}). Resolution turns a semantic-field {@code neural} leg into a {@code neural_sparse} query or a
-     * {@code nested} query over the chunks, which {@link #isMaterializableLeg} accepts for that reason. A leg the user wrote
-     * in one of those forms is not eligible and stays a real query, so what it reports in {@code matched_queries} — its
-     * inner {@code _name}s, and its scores under {@code include_named_queries_score} — is its own rather than an address's
-     * (see {@link #legMaterializedIfWorthIt}).
+     * Legs for which materializing is <i>worth</i> it: an ANN leg re-run in the Tail re-walks the HNSW graph (and a
+     * {@code neural} one re-runs inference) purely to recount what the fan-out already retrieved, while a term-defined leg
+     * costs almost nothing to re-run. This is a cost filter only — whether an address of the returned hits is <i>correct</i>
+     * is decided per response by the truncation test in {@link #legInTailForm}, not here.
      *
-     * <p>A leg still named {@code neural} once resolved ({@link #carriesInference}) is eligible whatever it was written as, so
-     * a short one is materialized like any other eligible leg; {@link #unionCountRequest} relies on that when it refuses to
-     * count one. That includes a {@code wrapper} or {@code template} leg that resolves to one, which the Tail did not
-     * materialize before the legs were resolved.
-     *
-     * <p>No leg is eligible when {@code writtenLegs} is missing or does not line up with {@code legs}.
-     */
-    private static boolean eligibleForMaterialization(List<QueryBuilder> writtenLegs, List<QueryBuilder> legs, int legIndex) {
-        if (Objects.isNull(writtenLegs) || Objects.isNull(legs) || writtenLegs.size() != legs.size()) {
-            return false;
-        }
-        String writtenName = writtenLegs.get(legIndex).getWriteableName();
-        return KNNQueryBuilder.NAME.equals(writtenName)
-            || NeuralQueryBuilder.NAME.equals(writtenName)
-            || NeuralKNNQueryBuilder.NAME.equals(writtenName)
-            || carriesInference(legs.get(legIndex));
-    }
-
-    /**
-     * Legs for which materializing is <i>worth</i> it: a leg whose re-execution in the Tail is a vector or sparse-vector
-     * search — an HNSW walk, a sparse ANN walk, or a disjunction over a model's query tokens — purely to recount what the
-     * fan-out already retrieved, while a term-defined leg costs almost nothing to re-run. This is a cost filter only — whether an
-     * address of the returned hits is <i>correct</i> is decided per response by the truncation test in {@link #legInTailForm},
-     * not here: a leg that returned fewer hits than the window it was sized to has returned its whole match set, whatever its
-     * type.
-     *
-     * <p>Asked about the resolved form ({@code FusedLegResolver}) of a leg {@link #eligibleForMaterialization} admits, so a
-     * {@code neural} leg is seen as what it runs as: a {@code neural_knn} against a k-NN field, a {@code neural_sparse} against
-     * a {@code rank_features} semantic field, or — for a chunking-enabled semantic field — a {@code nested} query over the
-     * chunks whose inner query is one of those. The {@code nested} form is seen through for that reason: the hits are the
-     * parent documents, which is what the Tail addresses, and the expensive walk is over the chunks. A {@code nested} around a
-     * lexical query is left as the cheap re-execution it is. The {@code neural_sparse} and {@code nested} shapes are accepted
-     * here for what a {@code neural} leg resolves to; a leg the user wrote in either shape is not eligible and never reaches
-     * this test. A leg still named {@code neural} is a semantic-field leg over several target indices, which keeps
-     * its name until the shard ({@code NeuralQueryBuilder#rewriteQueryWithCoordinatorContext} returns itself when the
-     * embedding field path differs per index); for that one the coordinator cannot tell dense from sparse by name, and the
-     * truncation test is what keeps materializing it safe: a leg that filled the window may have matched documents it never
-     * returned, so it is kept as the real query and counted properly. Materialized on the strength of the name alone, without
-     * that test, such a leg once dropped everything past the window from {@code total_hits} and from every aggregation
-     * bucket, at HTTP 200.
+     * <p>Keeping the two separate is what makes the rule safe for a leg whose writeable name does not determine its match
+     * set. {@code neural} is exactly that: against a {@code rank_features} semantic embedding field it rewrites into a
+     * {@code neural_sparse} query, whose match set is every document containing a query token — far larger than the window
+     * — and fused mode substitutes the Tail before the legs are rewritten, so the coordinator sees the same {@code neural}
+     * name either way and cannot tell dense from sparse. Materialized on the strength of the name alone, such a leg dropped
+     * everything past the window from {@code total_hits} and from every aggregation bucket, at HTTP 200. The truncation
+     * test refuses it for the same reason it refuses a deep-{@code k} dense leg: it filled the window, so what it returned
+     * is not known to be all it matched.
      */
     private static boolean isMaterializableLeg(QueryBuilder leg) {
-        if (isAnnLeg(leg) || NeuralSparseQueryBuilder.NAME.equals(leg.getWriteableName())) {
-            return true;
-        }
-        return leg instanceof NestedQueryBuilder && isMaterializableLeg(((NestedQueryBuilder) leg).query());
-    }
-
-    /**
-     * Among the legs {@link #eligibleForMaterialization} admits, the resolved forms treated as a graph walk: {@code knn},
-     * {@code neural_knn}, a leg still named {@code neural} (a semantic-field leg over several indices, dense or sparse; the
-     * name cannot tell), and a {@code nested} over one of those, which is what a chunking-enabled semantic field resolves to.
-     * A graph walk retrieves a bounded candidate set, so an address of what such a leg returned is what
-     * {@link #namedLegsForRegistration} carries for its {@code _name} even untruncated; {@code neural_sparse}, whose match set
-     * is every document holding a query token, is kept out of that path, and so is a {@code nested} over it.
-     */
-    private static boolean isAnnLeg(QueryBuilder leg) {
         String name = leg.getWriteableName();
-        if (KNNQueryBuilder.NAME.equals(name) || NeuralQueryBuilder.NAME.equals(name) || NeuralKNNQueryBuilder.NAME.equals(name)) {
-            return true;
-        }
-        return leg instanceof NestedQueryBuilder && isAnnLeg(((NestedQueryBuilder) leg).query());
+        return KNNQueryBuilder.NAME.equals(name) || NeuralQueryBuilder.NAME.equals(name) || NeuralKNNQueryBuilder.NAME.equals(name);
     }
 
     /**
-     * Whether re-executing this leg may cost a <b>model inference</b> on top of whatever it reads. Only a leg still named
-     * {@code neural} can: {@code knn} carries its vector in the request, and {@code neural_knn} ({@link NeuralKNNQueryBuilder})
-     * wraps a {@link KNNQueryBuilder} whose vector is already resolved.
+     * Whether re-executing this leg costs a <b>model inference</b> on top of whatever it reads. Only {@code neural} does:
+     * {@code knn} carries its vector in the request, and {@code neural_knn} ({@link NeuralKNNQueryBuilder}) wraps a
+     * {@link KNNQueryBuilder} whose vector is already resolved.
      *
-     * <p>The legs this is asked about arrive resolved ({@code FusedLegResolver} brings each to the fixpoint its own
-     * coordinator rewrite reaches, ahead of the fan-out), so a {@code neural} leg against a k-NN field has already become a
-     * {@code neural_knn} and answers {@code false} here. What is still {@code neural} after that is a semantic-field leg over
-     * several target indices, which keeps its name until the shard and holds its embeddings in suppliers the name does not
-     * reveal — so this answers {@code true} for it, conservatively: a re-execution that <i>might</i> infer is weighed as one
-     * that does. Nothing caches an embedding ({@code MLCommonsClientAccessor} caches {@code MLModel} metadata), and against a
-     * remote connector an inference is a network round trip, per-call spend, and another throttle path, which is why it is
-     * weighed differently from a local graph walk even where one round trip would be saved.
+     * <p>It matters because the count round's disjunction is built from the <b>original</b> leg builders — round 1 rewrites
+     * a copy ({@code NeuralQueryBuilder#rewriteQueryAgainstKnnField} returns a new builder holding the {@code SetOnce}),
+     * leaving the original's {@code vectorSupplier()} null — so rewriting the count re-enters the inference branch and calls
+     * the model again. Nothing caches the result: {@code MLCommonsClientAccessor} caches {@code MLModel} metadata, not
+     * embeddings. Against a remote connector that is a network round trip, per-call spend, and another throttle path, which
+     * is why it is weighed differently from a local graph walk even where one round trip would be saved.
      */
     private static boolean carriesInference(QueryBuilder leg) {
         return NeuralQueryBuilder.NAME.equals(leg.getWriteableName());
@@ -1294,14 +1132,8 @@ final class HybridFusionOrchestrator {
      *       forms are carried for registration alone instead (see {@link #buildFusedQuery} and
      *       {@code HybridFusionQueryBuilder#registerNamedOnlyQueries}), which keeps a Top-only query Top-only.</li>
      * </ul>
-     *
-     * <p>Also asked before the legs run, by {@code HybridQueryBuilder#requestShapeMayKeepTheTail}, with
-     * {@code numRankedDocs} {@code 0} — the fewest ranked documents there could be. Only the count depends on the
-     * ranking, and it can only stop wanting the Tail as the ranking grows, so {@code false} there is {@code false} for
-     * every ranking: such a request's round 2 is Top-only, its page holds ranked documents alone, and
-     * {@code HybridQuerySearchRequestFilter} attaches no {@code FusedRankedPageTrimmer} to it.
      */
-    static boolean needsTail(SearchSourceBuilder source, int numRankedDocs) {
+    private static boolean needsTail(SearchSourceBuilder source, int numRankedDocs) {
         if (Objects.nonNull(source) && (Objects.nonNull(source.aggregations()) || Objects.nonNull(source.highlighter()))) {
             return true;
         }
@@ -1312,10 +1144,10 @@ final class HybridFusionOrchestrator {
     }
 
     /**
-     * The legs that declare {@code inner_hits}, in their un-materialized form, for fetch-phase registration. Only legs
-     * actually carrying an inner_hits definition are kept, so the common case registers nothing. Note these are the leg
-     * builders as the fan-out ran them (resolved, see {@code FusedLegResolver}) rather than the Tail's possibly
-     * id-materialized form — a kNN/neural leg materialized to ids has no inner_hits definition left to extract.
+     * The legs that declare {@code inner_hits}, in their original (un-materialized) form, for fetch-phase registration.
+     * Only legs actually carrying an inner_hits definition are kept, so the common case registers nothing. Note these are
+     * the original leg builders rather than the Tail's possibly id-materialized form — a kNN/neural leg materialized to
+     * ids has no inner_hits definition left to extract.
      */
     private static List<QueryBuilder> innerHitsLegs(List<QueryBuilder> legs) {
         List<QueryBuilder> withInnerHits = new ArrayList<>();
@@ -1361,15 +1193,12 @@ final class HybridFusionOrchestrator {
      * Whether the request's <i>shape</i> leaves the Tail nothing to do but count — the source-only half of
      * {@link #onlyTotalsNeedTheTail}, decidable before the legs run and therefore also the condition under which asking
      * the legs to count is worth anything at all ({@code HybridQuerySearchRequestFilter} and the fused rewrite consult it
-     * before arming the count). Everything that makes the Tail's <i>documents</i> matter fails it: the features
-     * {@link #needsTail} names, a {@code min_score} (core's count is of the documents that pass it, not of the union), and
-     * any sort other than {@code _score} descending: {@code _score} <i>ascending</i> puts the score-0 Tail documents first,
-     * and a page in that order is not kept to the ranking, so with them absent the page changes.
-     *
-     * <p>A {@code search_after} cursor and a {@code collapse} without {@code inner_hits} (with them it is one of
-     * {@link #needsTail}'s features) fail it too, but only conservatively: the rule predates
-     * {@code FusedRankedPageTrimmer}, since which neither shape's page depends on the Tail. Admitting them is part of the
-     * follow-up {@link #decideFastPathAfterLegs} describes, together with the page bound it names.
+     * before arming the count; see finding 1 of the review on this change). Everything that makes the Tail's
+     * <i>documents</i> matter fails it: the features {@link #needsTail} names, plus the shapes where Tail-only documents
+     * (score {@code 0}) are what fills the result — a {@code search_after} cursor, a {@code collapse} whose groups the
+     * window may not fill, a {@code min_score} (core's count is of the documents that pass it, not of the union), and any
+     * sort other than {@code _score} descending: {@code _score} <i>ascending</i> puts the score-0 Tail documents first, so
+     * with them absent the page changes. The page bound itself needs the ranked count and is checked separately.
      */
     static boolean requestShapeAllowsDerivedTotalHits(SearchSourceBuilder source) {
         if (Objects.isNull(source)) {
@@ -1401,11 +1230,8 @@ final class HybridFusionOrchestrator {
     /**
      * Whether the Tail, if {@link #needsTail} asked for it, is there for {@code hits.total} and nothing else — the one case
      * where a count derived from the legs can replace it: the request's shape allows it
-     * ({@link #requestShapeAllowsDerivedTotalHits}) and the page fits inside the ranked window. Each excluded shape stays
-     * exactly as it is today.
-     *
-     * <p>The page bound is conservative since {@code FusedRankedPageTrimmer}; see {@link #decideFastPathAfterLegs} for
-     * why, and for the sites that move together when it is lifted.
+     * ({@link #requestShapeAllowsDerivedTotalHits}) and the page fits inside the ranked window, so no Tail-only document
+     * would have filled a slot. Each excluded shape stays exactly as it is today.
      */
     private static boolean onlyTotalsNeedTheTail(SearchSourceBuilder source, int numRankedDocs) {
         return requestShapeAllowsDerivedTotalHits(source) && requestedPageEnd(source) <= numRankedDocs;
@@ -1414,25 +1240,16 @@ final class HybridFusionOrchestrator {
     /**
      * Whether dropping the Tail would change {@code matched_queries}. With the Tail, a named leg is registered as the query
      * the user wrote; without it, {@link #namedLegsForRegistration} carries a named ANN leg as an address of the documents
-     * it <i>returned</i> — deliberately, to spare a shard-side ANN compile for a reporting field. That address is the leg's match set only when the leg returned all of it; a named ANN leg that
+     * it <i>returned</i> — deliberately, to spare a shard-side ANN compile (and for {@code neural}, a second inference) for
+     * a reporting field. That address is the leg's match set only when the leg returned all of it; a named ANN leg that
      * filled its window may have matched a page document it never returned, and that document would lose the entry the
      * Tail path reports. The count is not allowed to stand in for the Tail in that one shape, so the default path keeps
-     * reporting exactly what it did. An ANN leg here is one that path materializes: eligible
-     * ({@link #eligibleForMaterialization}) and {@link #isAnnLeg}; any other named leg it carries in its Tail form, which
-     * keeps a leg that filled the window as the real query.
+     * reporting exactly what it did.
      */
-    private static boolean namedAnnLegFilledTheWindow(
-        List<QueryBuilder> writtenLegs,
-        List<QueryBuilder> legs,
-        SearchHit[][] legHits,
-        int windowSize
-    ) {
+    private static boolean namedAnnLegFilledTheWindow(List<QueryBuilder> legs, SearchHit[][] legHits, int windowSize) {
         for (int legIndex = 0; legIndex < legs.size(); legIndex++) {
             QueryBuilder leg = legs.get(legIndex);
-            if (eligibleForMaterialization(writtenLegs, legs, legIndex)
-                && isAnnLeg(leg)
-                && legHits[legIndex].length >= windowSize
-                && carriesQueryName(leg)) {
+            if (isMaterializableLeg(leg) && legHits[legIndex].length >= windowSize && carriesQueryName(leg)) {
                 return true;
             }
         }
@@ -1550,17 +1367,14 @@ final class HybridFusionOrchestrator {
      *   <li><b>shard-side phases that need the fused docs or the match set on the shard</b> — {@code aggregations},
      *       {@code highlight}, any {@code sort} (a {@code _score} sort's {@code sort} values are produced shard-side too),
      *       {@code collapse}, {@code search_after}, {@code min_score}, {@code rescore} ({@code RescorePhase} rescores the
-     *       shard's own query-phase top docs, which the fast path never produces), exact totals
-     *       ({@code track_total_hits: true} needs the Tail's count);</li>
+     *       shard's own query-phase top docs, which the fast path never produces), a page reaching past the window
+     *       (Tail-only documents fill it), exact totals ({@code track_total_hits: true} needs the Tail's count);</li>
      *   <li><b>fetch-phase features the legs can serve only for the leg that returned the document</b> —
      *       {@code script_fields} (a script may read {@code _score}, on a leg the raw score); {@code inner_hits} and leg
      *       {@code _name}s are checked against the legs by {@link #decideFastPathBeforeLegs};</li>
      *   <li><b>coordinator-side processing after the search</b> — {@code profile} (round 2's tree is part of what it
      *       reports) here; search-pipeline response processors at the rewrite, where the pipeline is resolvable.</li>
      * </ul>
-     * Whether the page fits inside the ranked window is not part of the shape. A page reaching past {@code window_size}
-     * could be refused from the source alone, but whether a page inside it fits needs the ranked count — the legs may rank
-     * fewer than the window — so both are decided together after the legs run ({@link #decideFastPathAfterLegs}).
      * Source-only and O(fields), so the filter can consult it on every search before deciding to attach anything.
      */
     static boolean requestShapeAllowsFastPath(SearchSourceBuilder source) {
@@ -1618,12 +1432,6 @@ final class HybridFusionOrchestrator {
      * {@code rootHybrid} says whether this hybrid is the request's own query, the one thing the rewrite cannot see and
      * {@code HybridQuerySearchRequestFilter} tells it. What the legs decide afterwards ({@link #decideFastPathAfterLegs})
      * completes the verdict.
-     *
-     * <p>Asked about the legs <b>as written</b>, before {@code FusedLegResolver} brings them to their fixpoints: the two
-     * things read off them here, a {@code _name} and an {@code inner_hits} declaration, survive a rewrite (core's
-     * {@code AbstractQueryBuilder#rewrite} inherits the name onto the rewritten builder; {@code nested} keeps its inner hits),
-     * so the verdict holds for what the fan-out then runs. A reader adding a third leg property here must check that it is
-     * invariant under rewrite too — a {@code wrapper} leg, for one, is a different builder altogether once resolved.
      */
     static FastPathDecision decideFastPathBeforeLegs(SearchRequest request, List<QueryBuilder> legs, int windowSize, boolean rootHybrid) {
         FastPathDecision decision = new FastPathDecision();
@@ -1721,21 +1529,6 @@ final class HybridFusionOrchestrator {
      * on the armed path, where it decides the fallback, and on the two-round path of a profiled request, where it
      * completes the report; a decision already refused before the legs is left as it is. {@code countedUnion} is the union
      * a lazy count-only round established, or {@code null} when none ran.
-     *
-     * <p><b>The page bound, and why it is conservative — the one statement the other page bounds point to.</b> Every bound
-     * of the form "the page must fit inside the ranked window" dates from when a two-round page reaching past the ranked
-     * documents was filled with Tail-only ones at score 0, so that only round 2 with the Tail could produce it. Since
-     * {@code FusedRankedPageTrimmer} that page ends at the last ranked document whether or not the Tail runs — exactly where
-     * {@link #assemblePage} ends an assembled one, and where a Top-only round 2 ends anyway — so for a request that pages
-     * the fused ranking the bound no longer protects a different page: refusing the fast path costs a round
-     * ({@link FastPathDecision#PAGE_BEYOND_WINDOW}), and keeping the Tail for the count costs round 2 a re-match of the
-     * legs. The one shape where it still matters is the trimmer standing aside: a search request processor that changed
-     * the request's shape after {@code HybridQuerySearchRequestFilter} read it, whose page is left as round 2 returns it.
-     * Lifting the bound is a follow-up optimization, and the sites below move together, because each hands the next a
-     * count or a page the others assume: this method; {@link #unionCountRequest}'s two page tests, which withhold the
-     * count-only round from pages they expect round 2 to serve; {@link #onlyTotalsNeedTheTail}; the {@code search_after}
-     * and plain {@code collapse} refusals in {@link #requestShapeAllowsDerivedTotalHits}; and the rewrite's leg-count
-     * arming in {@code HybridQueryBuilder#doRewriteFused}, the before-the-legs form of the same test.
      */
     static void decideFastPathAfterLegs(
         FastPathDecision decision,
@@ -1851,9 +1644,9 @@ final class HybridFusionOrchestrator {
      *
      * <p>{@code fastPathArmed} says the rewrite judged the request eligible before the legs ran (shape, legs, pipeline) and
      * made the legs fetch the user's fields. Two things are only knowable now, and either sends the request down the
-     * two-round path with the legs' results reused as they are: the page must fit inside the ranked window (a conservative
-     * bound since {@code FusedRankedPageTrimmer}; see {@link #decideFastPathAfterLegs}), and a request that wants a count
-     * beyond the window must have a leg that proves it (see {@link #totalHitsFromLegs}); totals disabled need no count at all.
+     * two-round path with the legs' results reused as they are: the page must fit inside the ranked window (past it,
+     * Tail-only documents fill the slots — the same rule the Tail keeps), and a request that wants a count beyond the
+     * window must have a leg that proves it (see {@link #totalHitsFromLegs}); totals disabled need no count at all.
      * Both paths report through the same consumers, so a caller cannot tell them apart from the hits except by latency
      * and by the order of documents with bit-identical fused scores inside one shard — which, at a page edge, is which
      * of the tied documents the page shows (see {@link #roundTwoOrder}). What tells them apart on purpose: the
@@ -1906,41 +1699,6 @@ final class HybridFusionOrchestrator {
         boolean fastPathArmed,
         TotalHits countedUnion
     ) {
-        return buildFusedResult(
-            source,
-            multiSearchResponse,
-            legs,
-            legs,
-            fusion,
-            windowSize,
-            timings,
-            explanations,
-            originalQuery,
-            totalHitsConsumer,
-            fastPathArmed,
-            countedUnion
-        );
-    }
-
-    /**
-     * As above, with {@code writtenLegs} the legs as the user wrote them, in the order of {@code legs}, which are their
-     * resolved forms ({@code FusedLegResolver}). Whether a leg may be materialized is read off the written one
-     * ({@link #eligibleForMaterialization}). The overloads above pass {@code legs} for both.
-     */
-    static FusedResult buildFusedResult(
-        SearchSourceBuilder source,
-        MultiSearchResponse multiSearchResponse,
-        List<QueryBuilder> writtenLegs,
-        List<QueryBuilder> legs,
-        FusionSpec fusion,
-        int windowSize,
-        FusedCoordinatorTimings timings,
-        FusedDocExplanations explanations,
-        HybridQueryBuilder originalQuery,
-        FusedTotalHitsMerger.TotalHitsConsumer totalHitsConsumer,
-        boolean fastPathArmed,
-        TotalHits countedUnion
-    ) {
         if (fastPathArmed == false) {
             // No counted union to pass on: unionCountRequest issues the round for an armed request only, so countedUnion is
             // null on every un-armed call.
@@ -1948,7 +1706,6 @@ final class HybridFusionOrchestrator {
                 buildFusedQuery(
                     source,
                     multiSearchResponse,
-                    writtenLegs,
                     legs,
                     fusion,
                     windowSize,
@@ -1984,7 +1741,7 @@ final class HybridFusionOrchestrator {
             // refusal read here is one of the post-leg three, and none of them can both hold a usable count and reach the
             // Tail decision — see buildSubstitute.
             return FusedResult.twoRound(
-                buildSubstitute(source, items, legHits, ranked, writtenLegs, legs, windowSize, timings, originalQuery, totalHitsConsumer)
+                buildSubstitute(source, items, legHits, ranked, legs, windowSize, timings, originalQuery, totalHitsConsumer)
             );
         }
         // Totals: disabled → none; otherwise what round 2 would have reported, which the verdict above established is known.

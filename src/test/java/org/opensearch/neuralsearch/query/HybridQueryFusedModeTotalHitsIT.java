@@ -485,18 +485,18 @@ public class HybridQueryFusedModeTotalHitsIT extends BaseNeuralSearchIT {
     }
 
     /**
-     * A page reaching past the ranked window ends at the window — a fused page holds ranked documents only — and the total
-     * still counts the union, up to the threshold.
+     * A page reaching past the ranked window is filled by Tail-only documents; dropping the Tail would shorten it. The
+     * count alone is not allowed to stand in for the Tail here, so every requested slot is filled exactly as before.
      */
     @SneakyThrows
-    public void testTotalHits_whenThePageReachesPastTheWindow_thenThePageEndsAtTheWindowAndTheTotalStillCounts() {
+    public void testTotalHits_whenThePageReachesPastTheWindow_thenTheTailIsKeptAndThePageIsFull() {
         prepareIndex();
         int size = WINDOW + 3;
         String body = "{\"size\":" + size + ",\"track_total_hits\":" + THRESHOLD + ",\"query\":" + fusedQuery(WINDOW) + "}";
 
         Map<String, Object> response = search(body);
 
-        assertEquals("the page ends at the fused window", WINDOW, hits(response).size());
+        assertEquals("Tail-only documents fill the slots past the fused window", size, hits(response).size());
         assertEquals(THRESHOLD, total(response).get("value"));
         assertEquals("gte", total(response).get("relation"));
     }

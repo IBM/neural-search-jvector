@@ -81,7 +81,7 @@ public final class FusionSpec {
     static final int DEFAULT_RANK_CONSTANT = RRFScoreNormalizer.DEFAULT_RANK_CONSTANT;
 
     // Config-map keys (shared by the normalization-processor and score-ranker-processor definitions)
-    static final String PHASE_RESULTS_PROCESSORS_KEY = "phase_results_processors";
+    private static final String PHASE_RESULTS_PROCESSORS_KEY = "phase_results_processors";
     private static final String NORMALIZATION_CLAUSE = "normalization";
     private static final String COMBINATION_CLAUSE = "combination";
     private static final String TECHNIQUE_KEY = "technique";
@@ -90,36 +90,12 @@ public final class FusionSpec {
     private static final String RANK_CONSTANT_KEY = RRFScoreNormalizer.PARAM_NAME_RANK_CONSTANT;
 
     /**
-     * The reasons a {@code weights} value is refused, shared by the long form here ({@code parameter [weights] ...}) and
-     * the top-level shorthand in {@code HybridQueryBuilder} ({@code [hybrid] query [weights] ...}), so the two read the
-     * same apart from the subject. Classic's {@code normalization-processor} wording for the first.
-     */
-    static final String WEIGHTS_MUST_BE_NUMBERS = "must be a collection of numbers";
-    static final String WEIGHTS_MUST_NOT_BE_EMPTY = "must not be empty: omit it to weight every sub-query equally";
-
-    /**
      * The only {@code normalization.parameters} key fused mode honors, and only where {@code rrf} is the normalization
      * technique. Every other parameter classic reads from that clause — min_max's {@code lower_bounds} and
      * {@code upper_bounds} — has no coordinator-side implementation, so it is refused rather than accepted and dropped;
      * see {@link #rejectUnhonoredNormalizationParameters}.
      */
     private static final Set<String> RRF_NORMALIZATION_PARAMETERS = Set.of(RANK_CONSTANT_KEY);
-
-    /**
-     * The only {@code combination.parameters} key fused mode honors, for every combination technique. It is the same set
-     * each classic combiner declares as its {@code SUPPORTED_PARAMS} and validates in its constructor
-     * ({@code ScoreCombinationUtil#validateParams}), so a key refused here is a key classic refuses at pipeline creation;
-     * see {@link #rejectUnhonoredCombinationParameters}.
-     */
-    private static final Set<String> COMBINATION_PARAMETERS = Set.of(WEIGHTS_KEY);
-
-    /**
-     * The keys an inline {@code normalization} or {@code combination} clause may carry, and the one more an inline rrf
-     * combination clause may: {@code rank_constant} sits on the clause itself in the score-ranker shape. Anything else
-     * in an inline clause is refused — see {@link #rejectUnknownClauseKeys}.
-     */
-    private static final Set<String> CLAUSE_KEYS = Set.of(TECHNIQUE_KEY, PARAMETERS_KEY);
-    private static final Set<String> RRF_COMBINATION_CLAUSE_KEYS = Set.of(TECHNIQUE_KEY, PARAMETERS_KEY, RANK_CONSTANT_KEY);
 
     private final Shape shape; // which processor shape this was read as
     private final String combinationTechnique; // rrf | arithmetic_mean
@@ -187,50 +163,13 @@ public final class FusionSpec {
         }
         requireObjectClause(fusionConfig, NORMALIZATION_CLAUSE);
         requireObjectClause(fusionConfig, COMBINATION_CLAUSE);
-        rejectUnknownClauseKeys(fusionConfig, NORMALIZATION_CLAUSE, CLAUSE_KEYS);
         if (fusionConfig.get(COMBINATION_CLAUSE) instanceof Map) {
             Object technique = ((Map<String, Object>) fusionConfig.get(COMBINATION_CLAUSE)).get(TECHNIQUE_KEY);
-            boolean rrf = Objects.nonNull(technique) && TECHNIQUE_RRF.equals(technique.toString().toLowerCase(Locale.ROOT));
-            rejectUnknownClauseKeys(fusionConfig, COMBINATION_CLAUSE, rrf ? RRF_COMBINATION_CLAUSE_KEYS : CLAUSE_KEYS);
-            if (rrf) {
+            if (Objects.nonNull(technique) && TECHNIQUE_RRF.equals(technique.toString().toLowerCase(Locale.ROOT))) {
                 return fromScoreRankerProcessor(fusionConfig);
             }
         }
         return fromNormalizationProcessor(fusionConfig);
-    }
-
-    /**
-     * Refuse a key an inline clause carries beside {@code technique} and {@code parameters} (and, on an rrf combination
-     * clause, {@code rank_constant}). The readers below take the keys they know and leave the rest unread, so without this
-     * a {@code weights} written one level too high — {@code combination: {technique, weights: [...]}} rather than under
-     * {@code parameters} — fused unweighted at HTTP 200, and a {@code rank_constant} on an arithmetic_mean clause ranked at
-     * the default 60. Same silent mis-ranking as an unknown parameter, refused the same way.
-     *
-     * <p>Inline blocks only. A pipeline-sourced config keeps classic's leniency here, because classic's factories read the
-     * same two keys and ignore the rest: a stray clause key changes nothing in a classic ranking, so dropping it fuses the
-     * pipeline exactly as classic serves it, and refusing it would make {@code fusion: "pipeline"} a 400 for a pipeline
-     * classic runs. That is the one rule the whole class follows — refuse what fused mode would otherwise serve
-     * <em>differently</em> from what was asked, and nothing more.
-     */
-    @SuppressWarnings("unchecked")
-    private static void rejectUnknownClauseKeys(Map<String, Object> fusionConfig, String clause, Set<String> knownKeys) {
-        if ((fusionConfig.get(clause) instanceof Map) == false) {
-            return;
-        }
-        Set<String> unknown = new TreeSet<>(((Map<String, Object>) fusionConfig.get(clause)).keySet());
-        unknown.removeAll(knownKeys);
-        if (unknown.isEmpty()) {
-            return;
-        }
-        throw new IllegalArgumentException(
-            String.format(
-                Locale.ROOT,
-                "[%s] contains unknown key %s in fused mode; supported keys are %s",
-                clause,
-                unknown,
-                new TreeSet<>(knownKeys)
-            )
-        );
     }
 
     @SuppressWarnings("unchecked")
@@ -251,7 +190,7 @@ public final class FusionSpec {
             if (Objects.nonNull(technique)) {
                 combination = technique.toString().toLowerCase(Locale.ROOT);
             }
-            weights = readWeights(combinationClause, combination);
+            weights = readWeights(combinationClause);
         }
         return new FusionSpec(Shape.NORMALIZATION_PROCESSOR, combination, normalization, readRankConstant(config, normalization), weights);
     }
@@ -296,9 +235,8 @@ public final class FusionSpec {
         float[] weights = new float[0];
         if (config.get(COMBINATION_CLAUSE) instanceof Map) {
             combinationClause = (Map<String, Object>) config.get(COMBINATION_CLAUSE);
-            // Before the generic parameter check, so a misplaced rank_constant keeps its own message saying where it goes.
             rejectRankConstantUnderParameters(combinationClause);
-            weights = readWeights(combinationClause, TECHNIQUE_RRF);
+            weights = readWeights(combinationClause);
         }
         int rankConstant = resolveScoreRankerRankConstant(combinationClause, readNormalizationParameters(config));
         // The score-ranker-processor has no normalization clause, so the default is what this shape almost always
@@ -364,43 +302,6 @@ public final class FusionSpec {
                 unhonored,
                 normalization,
                 new TreeSet<>(honoredParameters)
-            )
-        );
-    }
-
-    /**
-     * Refuse a {@code combination.parameters} key fused mode does not honor, rather than parsing the config as if it
-     * were not there. The only key any combiner reads is {@code weights}, and fused mode reads it itself and hands the
-     * combiner a map it rebuilt from the parsed array ({@code HybridFusionOrchestrator#weightsParams}) — so classic's own
-     * check, {@code ScoreCombinationUtil#validateParams}, never sees the raw keys. Without this a request whose intent is
-     * plainly weighted, {@code parameters: {weight: [0.2, 0.8]}}, fused <em>unweighted</em> at HTTP 200: the user asked
-     * for one ranking and silently received another, while the same clause in a classic pipeline is a 400 at creation
-     * ("supported parameters are [weights]").
-     *
-     * <p>Applied to the pipeline-sourced path too. In a single-version cluster that is a no-op, because classic has refused
-     * these keys at pipeline creation since the processor existed; in a mixed-version cluster, where a newer
-     * cluster-manager may have stored a pipeline whose combiner takes a parameter this coordinator does not know, it is
-     * the fail-closed check — and it matches classic on this same node, which cannot build that pipeline either.
-     *
-     * <p>The honored set is one set for every technique rather than one per technique only because that is what classic
-     * declares today: all four combiners' {@code SUPPORTED_PARAMS} are {@code [weights]}. A combiner that grows a
-     * parameter has to be admitted here as well, or fused mode starts dropping it.
-     */
-    private static void rejectUnhonoredCombinationParameters(Map<String, Object> combinationClause, String combination) {
-        Set<String> unhonored = new TreeSet<>(readParameters(combinationClause, COMBINATION_CLAUSE).keySet());
-        unhonored.removeAll(COMBINATION_PARAMETERS);
-        if (unhonored.isEmpty()) {
-            return;
-        }
-        throw new IllegalArgumentException(
-            String.format(
-                Locale.ROOT,
-                "[%s.%s] %s not supported with combination [%s] in fused mode; supported parameters are %s",
-                COMBINATION_CLAUSE,
-                PARAMETERS_KEY,
-                unhonored,
-                combination,
-                new TreeSet<>(COMBINATION_PARAMETERS)
             )
         );
     }
@@ -502,22 +403,21 @@ public final class FusionSpec {
 
     /**
      * {@code combination.parameters.weights}, read the same way for both shapes — weights sit on the combination clause,
-     * so the normalization technique has no bearing on them. Every other key under {@code parameters} is refused first
-     * ({@link #rejectUnhonoredCombinationParameters}), so nothing a user wrote there can be read as "absent".
+     * so the normalization technique has no bearing on them.
      *
      * <p>A {@code weights} that is present but not a list is refused rather than read as absent. The orchestrator hands
      * {@link org.opensearch.neuralsearch.processor.combination.ScoreCombinationUtil} a list it rebuilds from the parsed
      * array, so classic's own type check ("must be a collection of numbers") can never see the malformed value and a
      * scalar or string {@code weights} was fusing unweighted at HTTP 200 — the same request classic answers with a 400.
      *
-     * <p>The elements are checked too ({@link #weightsFromList}), and that half is <em>stricter</em> than classic rather
-     * than parity with it: the list check is the only one classic makes either ({@code ScoreCombinationUtil#validateParams}),
-     * and it then streams the elements through {@code Double::floatValue}, so a list holding a non-numeric or null element
-     * fails classic and fused mode alike with a cast failure at HTTP 500. Refused here with the reason instead — a request
-     * that cannot be served should say what to fix.
+     * <p>The elements are checked too, and that half is <em>stricter</em> than classic rather than parity with it: the list
+     * check is the only one classic makes either ({@code ScoreCombinationUtil#validateParams}), and it then streams the
+     * elements through {@code Double::floatValue}, so a list holding a non-numeric or null element fails classic and fused
+     * mode alike with a cast failure at HTTP 500. Refused here with the reason instead — a request that cannot be served
+     * should say what to fix.
      */
-    private static float[] readWeights(Map<String, Object> combinationClause, String combination) {
-        rejectUnhonoredCombinationParameters(combinationClause, combination);
+    @SuppressWarnings("unchecked")
+    private static float[] readWeights(Map<String, Object> combinationClause) {
         Map<String, Object> parameters = readParameters(combinationClause, COMBINATION_CLAUSE);
         if ((parameters.get(WEIGHTS_KEY) instanceof List) == false) {
             if (parameters.containsKey(WEIGHTS_KEY)) {
@@ -525,26 +425,7 @@ public final class FusionSpec {
             }
             return new float[0];
         }
-        return weightsFromList(parameters.get(WEIGHTS_KEY));
-    }
-
-    /**
-     * A {@code weights} value as the request wrote it — either the long form's list or top-level
-     * {@code hybrid.weights} — read into the array a spec carries. Anything but a non-empty list of numbers is refused with the reason.
-     *
-     * <p>Empty is refused too, and that is parity with classic rather than strictness beyond it: the
-     * {@code normalization-processor} rejects {@code weights: []} at pipeline creation (an empty list sums to 0, not 1),
-     * so a pipeline carrying one cannot exist, and an inline one was the only way to write it — fusing unweighted at
-     * HTTP 200 as if the key were absent, which is not what a list the caller went to the trouble of writing means.
-     */
-    static float[] weightsFromList(Object value) {
-        if ((value instanceof List) == false) {
-            throw weightsMustBeNumbers();
-        }
-        List<?> raw = (List<?>) value;
-        if (raw.isEmpty()) {
-            throw new IllegalArgumentException(String.format(Locale.ROOT, "parameter [%s] %s", WEIGHTS_KEY, WEIGHTS_MUST_NOT_BE_EMPTY));
-        }
+        List<Object> raw = (List<Object>) parameters.get(WEIGHTS_KEY);
         float[] weights = new float[raw.size()];
         for (int i = 0; i < raw.size(); i++) {
             // Checked per element, because the cast is unchecked: a non-numeric or null element would otherwise fail the
@@ -557,16 +438,8 @@ public final class FusionSpec {
         return weights;
     }
 
-    /**
-     * This spec with the given per-leg weights in place of its own; every technique setting is kept. Used to lay
-     * top-level {@code hybrid.weights} over a base read from the fusion block or from the pipeline.
-     */
-    FusionSpec withWeights(float[] weights) {
-        return new FusionSpec(shape, combinationTechnique, normalizationTechnique, rankConstant, weights);
-    }
-
     /** Classic's own wording for a malformed {@code weights}, so one request reads the same however it was refused. */
     private static IllegalArgumentException weightsMustBeNumbers() {
-        return new IllegalArgumentException(String.format(Locale.ROOT, "parameter [%s] %s", WEIGHTS_KEY, WEIGHTS_MUST_BE_NUMBERS));
+        return new IllegalArgumentException(String.format(Locale.ROOT, "parameter [%s] must be a collection of numbers", WEIGHTS_KEY));
     }
 }

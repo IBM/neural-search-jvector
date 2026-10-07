@@ -18,11 +18,9 @@ import static org.opensearch.neuralsearch.settings.NeuralSearchSettings.MAX_FUSI
 import static org.opensearch.neuralsearch.settings.NeuralSearchSettings.MAX_FUSION_LEG_SEARCHES_CEILING;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
@@ -32,9 +30,9 @@ import java.util.function.Function;
 
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.join.ScoreMode;
-import org.opensearch.OpenSearchStatusException;
 import org.opensearch.Version;
 import org.opensearch.action.OriginalIndices;
+import org.opensearch.action.search.MultiSearchRequest;
 import org.opensearch.action.search.MultiSearchResponse;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
@@ -49,7 +47,6 @@ import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
-import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexNotFoundException;
@@ -62,10 +59,6 @@ import org.opensearch.index.query.QueryCoordinatorContext;
 import org.opensearch.index.query.QueryRewriteContext;
 import org.opensearch.index.query.Rewriteable;
 import org.opensearch.index.query.TemplateQueryBuilder;
-import org.opensearch.index.query.TermQueryBuilder;
-import org.opensearch.index.query.WrapperQueryBuilder;
-import org.opensearch.core.xcontent.NamedXContentRegistry;
-import org.opensearch.core.ParseField;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.SearchShardTarget;
@@ -78,8 +71,6 @@ import org.opensearch.search.sort.NestedSortBuilder;
 import org.opensearch.search.sort.SortBuilders;
 import org.opensearch.search.pipeline.SearchPipelineMetadata;
 import org.opensearch.transport.client.Client;
-import org.opensearch.knn.index.query.KNNQueryBuilder;
-import org.opensearch.neuralsearch.ml.MLCommonsClientAccessor;
 import org.opensearch.neuralsearch.search.profile.FastPathDecision;
 import org.opensearch.neuralsearch.settings.NeuralSearchSettingsAccessor;
 import org.opensearch.neuralsearch.stats.events.EventStatsManager;
@@ -116,28 +107,16 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
     private static final String INDEX_NAME = "test-index";
     /** A nested path, for the two shapes that need one: a sort's nested filter, and a [nested] query. */
     private static final String NESTED_PATH = "nested";
-    private static final String MIXED_NESTING_MESSAGE =
-        "a [hybrid] query without [fusion] cannot be nested in a [hybrid] query with [fusion], or the other way around; "
-            + "use [fusion] on both";
 
     /** The cluster service the current {@link #initClusterUtil} call installed, so a test can swap only the resolver. */
     private ClusterService clusterService;
 
-    /**
-     * What a coordinator paid to rewrite one request: one entry in {@code legCountPerMultiSearch} per fan-out — the leg
-     * searches one fused hybrid dispatched from its registered action, each leg run as its own search the moment it resolved
-     * (see {@code FusedLegResolver}) — and the leg requests themselves, grouped the same way, for a test that needs to see what
-     * the legs ran as.
-     */
-    private record FanOut(List<Integer> legCountPerMultiSearch, List<LegSearches> issued, QueryBuilder finalQuery) {
+    /** What a coordinator paid to rewrite one request: one entry in {@code legCountPerMultiSearch} per fan-out. */
+    private record FanOut(List<Integer> legCountPerMultiSearch, QueryBuilder finalQuery) {
         int multiSearches() {
             return legCountPerMultiSearch.size();
         }
 
-    }
-
-    /** The leg searches one fan-out dispatched, in dispatch order. */
-    private record LegSearches(List<SearchRequest> requests) {
     }
 
     /**
@@ -254,369 +233,6 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         assertSame("a Tail inside a Tail is already marked", marked, MatchSetRewriteContext.wrap(marked));
     }
 
-    // ------------------------------------------- legs resolved before the fan-out -------------------------------------------
-
-    /**
-     * The defect behind neural-search#2073, end to end on the coordinator: a leg that rewrites the way {@code neural} does
-     * — registering its model call and returning a new builder — used to reach its fixpoint inside its leg sub-search, on a
-     * copy, so the Tail carried the user's original and a leg that filled the window inferred again when round 2 was
-     * rewritten. Now the legs are resolved once, ahead of the fan-out: the MultiSearch runs the resolved form, the Tail
-     * carries the same resolved form, and the model is called exactly once over the whole rewrite to completion.
-     *
-     * <p>{@code window_size} is 2 and every mocked leg returns 2 hits, so the resolving leg <i>fills</i> the window — the
-     * one shape where {@code legInTailForm} keeps the leg verbatim rather than materializing it, and so the one shape that
-     * used to re-infer.
-     */
-    @SneakyThrows
-    public void testTail_whenALegResolvesOnTheCoordinator_thenFanOutAndTailCarryTheResolvedLegAndItResolvesOnce() {
-        ResolvingLegQueryBuilder neuralLike = new ResolvingLegQueryBuilder(TEXT_FIELD_NAME, "shoes");
-        QueryBuilder lexical = termLeg();
-        HybridQueryBuilder hybrid = fused(neuralLike, lexical);
-        hybrid.fusion().put("window_size", 2);
-
-        FanOut fanOut = drive(request(hybrid));
-
-        assertEquals("one fan-out", 1, fanOut.multiSearches());
-        List<SearchRequest> legSearches = fanOut.issued().get(0).requests();
-        assertEquals(
-            "the leg sub-search runs the resolved form, not the inferring builder",
-            neuralLike.resolvedForm(),
-            legSearches.get(0).source().query()
-        );
-        assertSame("a leg with nothing to resolve runs as written", lexical, legSearches.get(1).source().query());
-
-        assertTrue(fanOut.finalQuery() instanceof HybridFusionQueryBuilder);
-        BoolQueryBuilder selfErased = ((HybridFusionQueryBuilder) fanOut.finalQuery()).buildSelfErasedQuery();
-        BoolQueryBuilder tail = (BoolQueryBuilder) selfErased.filter().get(0);
-        assertEquals(
-            "the leg filled the window, so the Tail keeps it as a query — the RESOLVED one",
-            neuralLike.resolvedForm(),
-            tail.should().get(0)
-        );
-        assertSame(lexical, tail.should().get(1));
-        assertEquals("the model was called once for the whole request", 1, neuralLike.inferences());
-    }
-
-    /**
-     * Whether the Tail materializes a short leg is read off the leg as written, not off what it resolved to. A {@code neural}
-     * leg over a semantic field resolves to {@code neural_sparse}, or to a {@code nested} query over the chunks; short, either
-     * is addressed by the hits it returned, as a {@code neural} leg always was. A {@code neural_sparse} leg the user wrote has
-     * the same resolved shape and is kept as the real query, as it always was. Every leg returns two hits against a window of
-     * ten.
-     */
-    @SneakyThrows
-    public void testTail_whenALegResolvesToAnotherShape_thenWhetherItIsMaterializedFollowsTheLegAsWritten() {
-        QueryBuilder resolvedSparse = legNamed(NeuralSparseQueryBuilder.NAME, null);
-        QueryBuilder resolvedChunks = QueryBuilders.nestedQuery("chunks", legNamed(NeuralKNNQueryBuilder.NAME, null), ScoreMode.Max);
-        QueryBuilder userSparse = legNamed(NeuralSparseQueryBuilder.NAME, null);
-        HybridQueryBuilder hybrid = fused(
-            legNamed(NeuralQueryBuilder.NAME, resolvedSparse),
-            legNamed(NeuralQueryBuilder.NAME, resolvedChunks),
-            userSparse
-        );
-        hybrid.fusion().put("window_size", 10);
-
-        FanOut fanOut = drive(request(hybrid));
-
-        List<SearchRequest> legSearches = fanOut.issued().get(0).requests();
-        assertSame("the leg sub-search runs the resolved form", resolvedSparse, legSearches.get(0).source().query());
-        assertSame(resolvedChunks, legSearches.get(1).source().query());
-        BoolQueryBuilder selfErased = ((HybridFusionQueryBuilder) fanOut.finalQuery()).buildSelfErasedQuery();
-        BoolQueryBuilder tail = (BoolQueryBuilder) selfErased.filter().get(0);
-        QueryBuilder addressed = HybridFusionQueryBuilder.addressDocuments(INDEX_NAME, "1", "2");
-        assertEquals("written as neural, resolved to neural_sparse: addressed by its hits", addressed, tail.should().get(0));
-        assertEquals("written as neural, resolved to nested: addressed by its hits", addressed, tail.should().get(1));
-        assertSame("written as neural_sparse: kept as the real query", userSparse, tail.should().get(2));
-    }
-
-    /**
-     * The resolution is per request, not per leg type: with two inferring legs each is resolved once and both reach the
-     * fan-out resolved. (Two calls in total, one per leg — the thing being pinned is that neither leg pays twice.)
-     */
-    @SneakyThrows
-    public void testFanOut_whenSeveralLegsResolve_thenEachIsResolvedOnce() {
-        ResolvingLegQueryBuilder first = new ResolvingLegQueryBuilder(TEXT_FIELD_NAME, "shoes");
-        ResolvingLegQueryBuilder second = new ResolvingLegQueryBuilder(TEXT_FIELD_NAME, "boots");
-
-        FanOut fanOut = drive(request(fused(first, second)));
-
-        List<SearchRequest> legSearches = fanOut.issued().get(0).requests();
-        assertEquals(first.resolvedForm(), legSearches.get(0).source().query());
-        assertEquals(second.resolvedForm(), legSearches.get(1).source().query());
-        assertEquals(1, first.inferences());
-        assertEquals(1, second.inferences());
-    }
-
-    /**
-     * Under the leg-preparation marker a fused hybrid stays as written and registers nothing: it is a leg of an enclosing
-     * fused query, runs as its own leg sub-search's request query, and must not be fanned out on this coordinator while the
-     * enclosing legs are being resolved. The assertion that fails if the early return in {@code doRewriteFused} is dropped.
-     */
-    @SneakyThrows
-    public void testFusedHybrid_whenRewrittenAsALegBeingPrepared_thenItIsLeftAsWrittenAndNoFanOutIsRegistered() {
-        HybridQueryBuilder hybrid = fused(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg());
-        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-        QueryCoordinatorContext coordinatorContext = coordinatorContext(request(hybrid), registered);
-
-        QueryBuilder rewritten = hybrid.rewrite(LegPreparationRewriteContext.wrap(coordinatorContext));
-
-        assertSame("left exactly as written", hybrid, rewritten);
-        assertTrue("and nothing was registered for it", registered.isEmpty());
-    }
-
-    /**
-     * A nested fused hybrid, resolved as a leg of the enclosing one, still fans out exactly once — as its own leg
-     * sub-search — and the enclosing Tail still reduces it to the union of its legs. The preparation step must not change
-     * either count: this is the depth-1 chain of the first test, re-asserted with a resolving leg beside the nested hybrid
-     * so the preparation actually has work to do on the same request.
-     */
-    @SneakyThrows
-    public void testNestedFusedHybrid_whenASiblingLegResolves_thenTheNestedHybridStillFansOutOnceAsALeg() {
-        HybridQueryBuilder inner = fused(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg());
-        ResolvingLegQueryBuilder neuralLike = new ResolvingLegQueryBuilder(TEXT_FIELD_NAME, "shoes");
-
-        FanOut fanOut = drive(request(fused(inner, neuralLike)));
-
-        assertEquals("this coordinator fans out once; the nested hybrid is a leg of it", 1, fanOut.multiSearches());
-        assertEquals(List.of(2), fanOut.legCountPerMultiSearch());
-        List<SearchRequest> legSearches = fanOut.issued().get(0).requests();
-        assertSame(
-            "the nested fused hybrid is sent as written, for its own sub-search to fan out",
-            inner,
-            legSearches.get(0).source().query()
-        );
-        assertEquals(neuralLike.resolvedForm(), legSearches.get(1).source().query());
-        assertEquals(1, neuralLike.inferences());
-    }
-
-    /**
-     * The request a leg is resolved against is the leg's own, not the enclosing one — pinned on the one read that differs
-     * between the two: k-NN's radial rewrite ({@code max_distance}/{@code min_score}, no {@code k}) copies
-     * {@code source().size()} into the builder as its {@code size}, and the sub-search's own rewrite leaves a builder whose
-     * size is already set alone. The leg sub-search is sized at the window, so a radial {@code knn} leg and a radial
-     * {@code neural} leg (resolved to {@code neural_knn}) are sized at the window whatever page the request asks for: none,
-     * the default, one inside the window, one larger than it, or one that ends past it. That is the fused contract: where
-     * k-NN reads the size, a radial leg's match set is bounded by {@code window_size}, as {@code k} bounds a {@code knn}
-     * leg's. Both legs fill the window, so the Tail carries the very builders the fan-out ran.
-     */
-    @SneakyThrows
-    public void testFanOut_whenARadialLegResolves_thenItIsSizedAtTheWindowWhateverThePage() {
-        stubNeuralInference();
-        Map<String, SearchSourceBuilder> pages = new LinkedHashMap<>();
-        pages.put("size 0", new SearchSourceBuilder().size(0));
-        pages.put("default size", new SearchSourceBuilder());
-        pages.put("size inside the window", new SearchSourceBuilder().size(1));
-        pages.put("size above the window", new SearchSourceBuilder().size(5));
-        pages.put("page ending past the window", new SearchSourceBuilder().from(2).size(1));
-        for (Map.Entry<String, SearchSourceBuilder> page : pages.entrySet()) {
-            String label = page.getKey();
-            HybridQueryBuilder hybrid = fused(
-                KNNQueryBuilder.builder().fieldName("vec").vector(new float[] { 1f, 2f }).maxDistance(1.5f).build(),
-                NeuralQueryBuilder.builder().fieldName("embedding").queryText("hello").modelId("m1").minScore(0.5f).build()
-            );
-            hybrid.fusion().put("window_size", 2);
-
-            FanOut fanOut = drive(new SearchRequest(INDEX_NAME).source(page.getValue().query(hybrid)));
-
-            List<SearchRequest> legSearches = fanOut.issued().get(0).requests();
-            KNNQueryBuilder knnLeg = (KNNQueryBuilder) legSearches.get(0).source().query();
-            KNNQueryBuilder neuralLeg = ((NeuralKNNQueryBuilder) legSearches.get(1).source().query()).getKnnQueryBuilder();
-            assertEquals(
-                String.format(Locale.ROOT, "[%s] the radial knn leg is sized at the window", label),
-                Integer.valueOf(2),
-                knnLeg.getSize()
-            );
-            assertEquals(String.format(Locale.ROOT, "[%s] and keeps its radius", label), Float.valueOf(1.5f), knnLeg.getMaxDistance());
-            assertEquals(
-                String.format(Locale.ROOT, "[%s] so is the resolved radial neural leg", label),
-                Integer.valueOf(2),
-                neuralLeg.getSize()
-            );
-            assertEquals(
-                String.format(Locale.ROOT, "[%s] which keeps its score bound", label),
-                Float.valueOf(0.5f),
-                neuralLeg.getMinScore()
-            );
-            BoolQueryBuilder selfErased = ((HybridFusionQueryBuilder) fanOut.finalQuery()).buildSelfErasedQuery();
-            BoolQueryBuilder tail = (BoolQueryBuilder) selfErased.filter().get(0);
-            assertSame(
-                String.format(Locale.ROOT, "[%s] the Tail carries the knn leg the fan-out ran", label),
-                legSearches.get(0).source().query(),
-                tail.should().get(0)
-            );
-            assertSame(
-                String.format(Locale.ROOT, "[%s] and the neural leg the fan-out ran", label),
-                legSearches.get(1).source().query(),
-                tail.should().get(1)
-            );
-        }
-    }
-
-    /**
-     * A leg that is itself a fused hybrid is left as written by the enclosing resolution and resolves its own legs in its own
-     * leg sub-search, at its own window. In the enclosing Tail it contributes its legs as written ({@code matchSetQuery}),
-     * and they are rewritten there under the enclosing request, so a radial leg among them takes that request's size.
-     */
-    @SneakyThrows
-    public void testTail_whenANestedFusedLegHoldsARadialLeg_thenTheEnclosingRequestSizesItInTheTail() {
-        KNNQueryBuilder radial = KNNQueryBuilder.builder().fieldName("vec").vector(new float[] { 1f, 2f }).maxDistance(1.5f).build();
-        HybridQueryBuilder inner = fused(radial, termLeg());
-        inner.fusion().put("window_size", 3);
-        HybridQueryBuilder outer = fused(inner, termLeg());
-        outer.fusion().put("window_size", 2);
-
-        FanOut fanOut = drive(new SearchRequest(INDEX_NAME).source(new SearchSourceBuilder().size(5).query(outer)));
-
-        assertSame("the nested hybrid runs as written", inner, fanOut.issued().get(0).requests().get(0).source().query());
-        BoolQueryBuilder selfErased = ((HybridFusionQueryBuilder) fanOut.finalQuery()).buildSelfErasedQuery();
-        BoolQueryBuilder nestedMatchSet = (BoolQueryBuilder) ((BoolQueryBuilder) selfErased.filter().get(0)).should().get(0);
-        KNNQueryBuilder inTail = (KNNQueryBuilder) nestedMatchSet.should().get(0);
-        // TODO: pre-existing behavior, not the fused contract; revisit with nested-leg resolution. The nested hybrid's own leg
-        // sub-search sizes this leg at its window (3), while the enclosing Tail sizes it at the request's page (5).
-        assertEquals("sized at the enclosing request's page, not at either window", Integer.valueOf(5), inTail.getSize());
-    }
-
-    /**
-     * Resolving a leg parses a {@code wrapper} and renders a {@code template}, whether it is the leg or inside it, so a fused
-     * hybrid one holds would run as part of its leg sub-search's own query without the request's leg sub-search budget ever
-     * counting it. The leg is refused with the request-level reachability check's message, and the request fails on it
-     * through {@code groupLegHits} with a 400. Nothing is dispatched for that leg; the sibling leg still runs, as beside any
-     * leg that fails to resolve. Inside the leg includes a {@code knn} leg's filter, and a {@code neural} leg's filter, which
-     * resolution moves into the filter of a {@code neural_knn} ({@link HybridQueryBuilder#neuralKnnFilter}).
-     */
-    @SneakyThrows
-    public void testFanOut_whenALegHoldsAFusedHybridInAWrapperOrTemplate_thenTheLegIsRefusedAndNotDispatched() {
-        stubNeuralInference();
-        String fusedJson = "{\"hybrid\":{\"fusion\":{},\"queries\":[{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}]}}";
-        Map<String, Object> fusedTemplate = Map.of(
-            "hybrid",
-            Map.of("fusion", Map.of(), "queries", List.of(Map.of("match", Map.of(TEXT_FIELD_NAME, "hello"))))
-        );
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("wrapper", new WrapperQueryBuilder(fusedJson));
-        shapes.put("template", new TemplateQueryBuilder(fusedTemplate));
-        shapes.put("wrapper inside a bool", QueryBuilders.boolQuery().should(new WrapperQueryBuilder(fusedJson)));
-        shapes.put("template inside a bool", QueryBuilders.boolQuery().should(new TemplateQueryBuilder(fusedTemplate)));
-        shapes.put(
-            "wrapper in a knn leg's filter",
-            KNNQueryBuilder.builder()
-                .fieldName("embedding")
-                .vector(new float[] { 1f, 2f })
-                .k(10)
-                .filter(new WrapperQueryBuilder(fusedJson))
-                .build()
-        );
-        shapes.put(
-            "wrapper in a neural leg's filter",
-            NeuralQueryBuilder.builder()
-                .fieldName("embedding")
-                .queryText("hello")
-                .modelId("m1")
-                .filter(new WrapperQueryBuilder(fusedJson))
-                .build()
-        );
-        String expected = String.format(
-            Locale.ROOT,
-            "[hybrid] fused-mode sub-query 0 failed: %s",
-            HybridQueryBuilder.notPartOfRequestQueryMessage()
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder lexical = termLeg();
-            HybridQueryBuilder hybrid = fused(shape.getValue(), lexical);
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(hybrid), registered);
-            when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-            hybrid.rewrite(coordinatorContext);
-            assertEquals(String.format(Locale.ROOT, "%s: round 1 registered the fan-out", shape.getKey()), 1, registered.size());
-            List<LegSearches> issued = new ArrayList<>();
-            Client client = legSearchingClient(new ArrayList<>(), issued, Set.of());
-
-            AtomicReference<Exception> failure = new AtomicReference<>();
-            registered.get(0)
-                .accept(
-                    client,
-                    ActionListener.wrap(settled -> fail(String.format(Locale.ROOT, "%s: expected a refusal", shape.getKey())), failure::set)
-                );
-
-            assertEquals(shape.getKey(), expected, failure.get().getMessage());
-            assertEquals(shape.getKey(), RestStatus.BAD_REQUEST, ((OpenSearchStatusException) failure.get()).status());
-            assertEquals(
-                String.format(Locale.ROOT, "%s: only the sibling leg was dispatched", shape.getKey()),
-                1,
-                issued.get(0).requests().size()
-            );
-            assertSame(shape.getKey(), lexical, issued.get(0).requests().get(0).source().query());
-        }
-    }
-
-    /**
-     * The contrast: a leg whose resolution adds no fused leg sub-search runs. A {@code wrapper} holding another query is
-     * parsed into it, a fused hybrid written as the leg is left as written, and a {@code neural} leg with a fused hybrid in
-     * its filter runs as a {@code neural_knn} that declares the same leg sub-searches.
-     */
-    @SneakyThrows
-    public void testFanOut_whenResolvingALegAddsNoFusedLegSearches_thenTheLegIsDispatched() {
-        stubNeuralInference();
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("wrapper holding a match", new WrapperQueryBuilder("{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}"));
-        shapes.put("fused hybrid written as the leg", nestedChain(1));
-        shapes.put(
-            "neural leg with a fused hybrid in its filter",
-            NeuralQueryBuilder.builder().fieldName("embedding").queryText("hello").modelId("m1").filter(nestedChain(1)).build()
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            SearchRequest searchRequest = request(fused(shape.getValue(), termLeg()));
-            List<Integer> legCountPerMultiSearch = new ArrayList<>();
-            List<LegSearches> issued = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = fanningOutContext(searchRequest, legCountPerMultiSearch, issued, Set.of());
-            when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-            AtomicReference<QueryBuilder> settled = new AtomicReference<>();
-            Rewriteable.rewriteAndFetch(searchRequest.source().query(), coordinatorContext, ActionListener.wrap(settled::set, e -> {
-                throw new AssertionError(String.format(Locale.ROOT, "%s: rewrite failed: %s", shape.getKey(), e.getMessage()), e);
-            }));
-
-            assertNotNull(String.format(Locale.ROOT, "%s: the rewrite completed", shape.getKey()), settled.get());
-            assertEquals(String.format(Locale.ROOT, "%s: both legs were dispatched", shape.getKey()), List.of(2), legCountPerMultiSearch);
-            assertEquals(
-                String.format(Locale.ROOT, "%s: the leg as run declares what the leg as written declares", shape.getKey()),
-                HybridQueryBuilder.countFusedLegSearches(shape.getValue()),
-                HybridQueryBuilder.countFusedLegSearches(issued.get(0).requests().get(0).source().query())
-            );
-        }
-    }
-
-    /**
-     * A leg that fails to resolve fails the request the way a failed leg sub-search does — same message shape, the leg's
-     * own status — and before any MultiSearch is dispatched, since there is nothing correct to fan out.
-     */
-    @SneakyThrows
-    public void testFanOut_whenALegFailsToResolve_thenTheRequestFailsNamingTheLegAndNothingIsDispatched() {
-        ResolvingLegQueryBuilder failing = new ResolvingLegQueryBuilder(TEXT_FIELD_NAME, "shoes").failWith(
-            new OpenSearchStatusException("model [m1] not found", RestStatus.NOT_FOUND)
-        );
-        HybridQueryBuilder hybrid = fused(termLeg(), failing);
-        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-        hybrid.rewrite(coordinatorContext(request(hybrid), registered));
-        assertEquals("round 1 registered the fan-out", 1, registered.size());
-        List<Integer> legCountPerMultiSearch = new ArrayList<>();
-        List<LegSearches> issued = new ArrayList<>();
-        Client client = legSearchingClient(legCountPerMultiSearch, issued, Set.of());
-
-        AtomicReference<Exception> failure = new AtomicReference<>();
-        registered.get(0).accept(client, ActionListener.wrap(settled -> fail("expected the fan-out to fail"), failure::set));
-
-        assertNotNull("the fan-out failed", failure.get());
-        assertEquals("[hybrid] fused-mode sub-query 1 failed: model [m1] not found", failure.get().getMessage());
-        assertEquals(RestStatus.NOT_FOUND, ((OpenSearchStatusException) failure.get()).status());
-        assertEquals(
-            "the leg that resolved ran while the other was failing to — the fan-out does not wait for the slowest leg",
-            List.of(1),
-            legCountPerMultiSearch
-        );
-        assertSame("and it is the lexical leg that ran", hybrid.queries().get(0), issued.get(0).requests().get(0).source().query());
-    }
-
     // ------------------------------------------------ the budget ------------------------------------------------
 
     /** The counted unit: declared legs, summed over every fused hybrid in the request, and nothing else. */
@@ -644,12 +260,6 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
             2,
             HybridQueryBuilder.countFusedLegSearches(insideContainer)
         );
-    }
-
-    /** {@code neural_knn} exposes nothing to {@code visit}; the count reads its filter, at any depth below it. */
-    public void testCountFusedLegSearches_countsAFusedHybridInANeuralKnnFilter() {
-        assertEquals(2, HybridQueryBuilder.countFusedLegSearches(neuralKnn(nestedChain(1))));
-        assertEquals(6, HybridQueryBuilder.countFusedLegSearches(neuralKnn(QueryBuilders.boolQuery().should(nestedChain(3)))));
     }
 
     /** The ceiling is derived from the per-query leg limit, not chosen independently, and cannot be set below it. */
@@ -925,14 +535,6 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         assertEquals(List.of(2), fanOut.legCountPerMultiSearch());
     }
 
-    /** {@code neural_knn} exposes nothing to {@code visit}; the reachability walk reads its filter, so a fused hybrid there is admitted. */
-    @SneakyThrows
-    public void testFusedHybridInANeuralKnnFilter_isAdmitted() {
-        FanOut fanOut = drive(request(neuralKnn(nestedChain(1))));
-
-        assertEquals("admitted, and fans out once", List.of(2), fanOut.legCountPerMultiSearch());
-    }
-
     /**
      * "At any depth a query builder exposes" would be the whole qualification if the walk trusted the builders, and core's
      * do not agree: {@code boosting} and {@code script_score} hand their inner query to {@code accept} without recursing
@@ -1104,13 +706,12 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         outer.rewrite(coordinatorContext(request(outer), registered));
         assertEquals("the outer hybrid fans out once", 1, registered.size());
 
-        List<SearchRequest> legSearches = new ArrayList<>();
+        List<MultiSearchRequest> multiSearches = new ArrayList<>();
         Client client = mock(Client.class);
-        // the legs never answer: only what each leg is dispatched as is under test
-        doAnswer(invocation -> legSearches.add(invocation.getArgument(0))).when(client).search(any(), any());
+        doAnswer(invocation -> multiSearches.add(invocation.getArgument(0))).when(client).multiSearch(any(), any());
         registered.getFirst().accept(client, ActionListener.wrap(response -> {}, e -> fail("leg fan-out failed: " + e.getMessage())));
 
-        SearchRequest legRequest = legSearches.getFirst();
+        SearchRequest legRequest = multiSearches.getFirst().requests().getFirst();
         assertTrue("the inner fused hybrid is its leg request's query", legRequest.source().query() instanceof HybridQueryBuilder);
 
         List<BiConsumer<Client, ActionListener<?>>> legRegistered = new ArrayList<>();
@@ -1119,49 +720,12 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         assertEquals("and it fans out its own legs from there", 1, legRegistered.size());
     }
 
-    /**
-     * A {@code neural} leg whose filter is a fused hybrid runs resolved, as a {@code neural_knn}, which unlike the
-     * {@code neural} exposes nothing to {@code visit}. Its leg sub-search's own rewrite must still find the hybrid in the
-     * request's query, admit it and fan out its legs, as it did when the sub-search carried the {@code neural}.
-     */
-    @SneakyThrows
-    public void testLegSubSearch_whenANeuralLegsFilterIsAFusedHybrid_thenTheResolvedLegStillAdmitsIt() {
-        stubNeuralInference();
-        HybridQueryBuilder inFilter = nestedChain(1);
-        HybridQueryBuilder outer = fused(
-            NeuralQueryBuilder.builder().fieldName("embedding").queryText("hello").modelId("m1").filter(inFilter).build(),
-            termLeg()
-        );
-        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-        outer.rewrite(coordinatorContext(request(outer), registered));
-
-        List<SearchRequest> legSearches = new ArrayList<>();
-        Client client = mock(Client.class);
-        // the legs never answer: only what each leg is dispatched as is under test
-        doAnswer(invocation -> legSearches.add(invocation.getArgument(0))).when(client).search(any(), any());
-        registered.getFirst()
-            .accept(
-                client,
-                ActionListener.wrap(response -> {}, e -> fail(String.format(Locale.ROOT, "leg fan-out failed: %s", e.getMessage())))
-            );
-
-        SearchRequest neuralLegRequest = legSearches.getFirst();
-        assertTrue("the neural leg ran resolved", neuralLegRequest.source().query() instanceof NeuralKNNQueryBuilder);
-        NeuralKNNQueryBuilder resolved = (NeuralKNNQueryBuilder) neuralLegRequest.source().query();
-        assertSame("with the fused hybrid as written as its filter", inFilter, resolved.getKnnQueryBuilder().getFilter());
-
-        List<BiConsumer<Client, ActionListener<?>>> legRegistered = new ArrayList<>();
-        resolved.rewrite(coordinatorContext(neuralLegRequest, legRegistered));
-
-        assertEquals("the leg sub-search admits the hybrid and fans out its legs", 1, legRegistered.size());
-    }
-
-    // ------------------------------------------------ kill switch ------------------------------------------------
+    // ------------------------------------------------- opt-in -------------------------------------------------
 
     /**
-     * An operator can turn fused mode off, and a query carrying a {@code fusion} block on a cluster that has is refused
-     * before anything is fanned out. The message has to name the setting: it is the only thing the user can act on, and
-     * nothing about their query is wrong.
+     * Fused mode is off until an operator turns it on, and a query carrying a {@code fusion}
+     * block on a cluster that has not is refused before anything is fanned out. The message has to name the setting: it
+     * is the only thing the user can act on, and nothing about their query is wrong.
      */
     @SneakyThrows
     public void testFusedMode_whenTurnedOffByClusterSetting_isRejectedBeforeAnyFanOut() {
@@ -1179,22 +743,26 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         );
         assertThat(error.getMessage(), containsString("is turned off on this cluster"));
         assertThat("and the alternative that works today", error.getMessage(), containsString("use classic hybrid"));
-        assertTrue("refused before a fan-out the cluster switched off", registered.isEmpty());
+        assertTrue("refused before a fan-out the cluster never opted in to", registered.isEmpty());
     }
 
     /**
-     * Cluster settings that cannot be read resolve to the setting's own default, which is on. That is the same value a
-     * cluster with nothing configured resolves, so an unreadable settings object fans out exactly where a cluster that
-     * never touched the switch does — there is no second, hidden default on this path.
+     * Cluster settings that cannot be read resolve to the setting's own default, which for this one is off. That is the
+     * same value a cluster with nothing configured resolves, so an unreadable settings object refuses exactly where a
+     * cluster that never opted in does rather than opening the path on the way through — the opposite trade
+     * from the leg budget, whose default is permissive.
      */
     @SneakyThrows
-    public void testFusedMode_whenClusterSettingsCannotBeRead_thenItFansOut() {
+    public void testFusedMode_whenClusterSettingsCannotBeRead_thenItIsRefused() {
         initClusterUtilWithoutClusterSettings();
+        QueryBuilder query = nestedChain(1);
+        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
+        QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
 
-        FanOut fanOut = drive(request(nestedChain(1)));
+        IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
 
-        assertEquals(1, fanOut.multiSearches());
-        assertEquals(List.of(2), fanOut.legCountPerMultiSearch());
+        assertThat(error.getMessage(), containsString(HYBRID_FUSION_ENABLED.getKey()));
+        assertTrue(registered.isEmpty());
     }
 
     /**
@@ -1217,7 +785,7 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
     /**
      * The switch is read above the {@code SearchRequest} cast, like the version refusal and for the same reason:
      * {@code _explain} and {@code _validate/query} rewrite on the coordinator with a non-search request and are dispatched
-     * still fused, so a cluster that has turned the switch off must refuse them too.
+     * still fused, so a cluster that has not opted in must refuse them too.
      */
     @SneakyThrows
     public void testFusedMode_whenTurnedOffAndTheRequestIsNotASearch_thenItIsStillRefused() {
@@ -1264,10 +832,10 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         HybridQueryBuilder hybrid = fused(match, term);
         List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
         QueryBuilder afterRoundOne = hybrid.rewrite(coordinatorContext(request(hybrid), registered));
-        assertEquals("round 1 fanned out while the switch was still on", 1, registered.size());
+        assertEquals("round 1 fanned out while the cluster was still opted in", 1, registered.size());
         registered.getFirst()
             .accept(
-                legSearchingClient(new ArrayList<>(), new ArrayList<>(), Set.of()),
+                multiSearchingClient(new ArrayList<>(), Set.of()),
                 ActionListener.wrap(response -> {}, e -> fail("leg fan-out failed: " + e.getMessage()))
             );
 
@@ -1277,18 +845,7 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         assertFalse("round 2 hands over the query the legs already paid for", roundTwo instanceof HybridQueryBuilder);
     }
 
-    /** Nothing configured: the default is on, and it fans out. */
-    @SneakyThrows
-    public void testFusedMode_whenNothingIsConfigured_thenItFansOut() {
-        initClusterUtil(null);
-
-        FanOut fanOut = drive(request(nestedChain(1)));
-
-        assertEquals(1, fanOut.multiSearches());
-        assertEquals(List.of(2), fanOut.legCountPerMultiSearch());
-    }
-
-    /** Switched on explicitly, which is the same as the default: it fans out. */
+    /** The other branch: opted in, and it fans out. */
     @SneakyThrows
     public void testFusedMode_whenTurnedOnExplicitly_thenItFansOut() {
         initClusterUtil(Settings.builder().put(HYBRID_FUSION_ENABLED.getKey(), true).build());
@@ -1300,12 +857,12 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
     }
 
     /**
-     * The shape of the switch itself. On by default is what ships the feature to every cluster, and dynamic is what makes
-     * it a kill switch — an operator who has to restart nodes to turn it off does not have one.
+     * The shape of the switch itself. Off by default is what makes the feature opt-in rather than announced, and dynamic
+     * is what makes it a kill switch — an operator who has to restart nodes to turn it back off does not have one.
      */
-    public void testFusedModeSetting_isOnByDefaultAndDynamic() {
+    public void testFusedModeSetting_isOffByDefaultAndDynamic() {
         assertEquals("plugins.neural_search.hybrid.fusion.enabled", HYBRID_FUSION_ENABLED.getKey());
-        assertTrue("fused mode ships on", HYBRID_FUSION_ENABLED.getDefault(Settings.EMPTY));
+        assertFalse("fused mode ships off", HYBRID_FUSION_ENABLED.getDefault(Settings.EMPTY));
         assertTrue("and has to be flippable without a restart, in both directions", HYBRID_FUSION_ENABLED.isDynamic());
     }
 
@@ -1555,259 +1112,6 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         assertEquals("the fan-out is unchanged", List.of(2), fanOut.legCountPerMultiSearch());
     }
 
-    /** A hybrid without [fusion] as a leg of a fused hybrid is a 400 before anything is fanned out, at any depth. */
-    @SneakyThrows
-    public void testFusedMode_whenHybridWithoutFusionIsNestedAtAnyDepth_thenRejectedBeforeAnyFanOut() {
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("as a leg", fused(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg()), termLeg()));
-        shapes.put(
-            "inside a bool in a leg",
-            fused(QueryBuilders.boolQuery().must(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg())), termLeg())
-        );
-        shapes.put(
-            "below a nested fused hybrid",
-            fused(fused(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg()), termLeg()), termLeg())
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(shape.getKey() + ": rejected before any fan-out", registered.isEmpty());
-        }
-    }
-
-    /** A fused hybrid below a hybrid without [fusion] is a 400 from the outer rewrite, before the inner one can run. */
-    @SneakyThrows
-    public void testClassicMode_whenFusedHybridIsNestedAtAnyDepth_thenRejectedBeforeAnyFanOut() {
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("as a sub-query", classic(nestedChain(1), termLeg()));
-        shapes.put("inside a bool in a sub-query", classic(QueryBuilders.boolQuery().must(nestedChain(1)), termLeg()));
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(shape.getKey() + ": rejected before the fused hybrid fanned out", registered.isEmpty());
-        }
-    }
-
-    /**
-     * A hybrid without [fusion] inside a [wrapper] or [template] leg is only seen by the leg search, after the wrapper or
-     * template has been rewritten into it, so the fused rewrite parses the query they hold to find it.
-     */
-    @SneakyThrows
-    public void testFusedMode_whenHybridWithoutFusionIsInsideAWrapperOrTemplateLeg_thenRejectedBeforeAnyFanOut() {
-        String classicJson = "{\"hybrid\":{\"queries\":[{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}]}}";
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("wrapper", fused(new WrapperQueryBuilder(classicJson), termLeg()));
-        shapes.put(
-            "template",
-            fused(
-                new TemplateQueryBuilder(Map.of("hybrid", Map.of("queries", List.of(Map.of("match", Map.of(TEXT_FIELD_NAME, "hello")))))),
-                termLeg()
-            )
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-            when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(shape.getKey() + ": rejected before any fan-out", registered.isEmpty());
-        }
-    }
-
-    /**
-     * A fused hybrid inside a [wrapper] leg is the same mode, so this check lets the fused rewrite fan out. The fan-out then
-     * refuses the leg itself: {@link #testFanOut_whenALegHoldsAFusedHybridInAWrapperOrTemplate_thenTheLegIsRefusedAndNotDispatched}.
-     */
-    @SneakyThrows
-    public void testFusedMode_whenFusedHybridIsInsideAWrapperLeg_thenNotRejectedAsMixedNesting() {
-        String fusedJson = "{\"hybrid\":{\"fusion\":{},\"queries\":[{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}]}}";
-        HybridQueryBuilder query = fused(new WrapperQueryBuilder(fusedJson), termLeg());
-        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-        QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-        when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-        query.rewrite(coordinatorContext);
-
-        assertEquals("the fused rewrite fanned out its legs", 1, registered.size());
-    }
-
-    /** A [wrapper] or [template] leg that does not hold a query is left to its own rewrite, which reports it in the leg search. */
-    @SneakyThrows
-    public void testFusedMode_whenAWrapperOrTemplateLegDoesNotHoldAQuery_thenLeftToItsOwnRewrite() {
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("wrapper with malformed JSON", fused(new WrapperQueryBuilder("{\"match\":"), termLeg()));
-        shapes.put("template with an unknown query", fused(new TemplateQueryBuilder(Map.of("not_a_query", Map.of())), termLeg()));
-        String tooManySubQueries = "{\"hybrid\":{\"queries\":["
-            + String.join(
-                ",",
-                Collections.nCopies(HybridQueryBuilder.MAX_NUMBER_OF_SUB_QUERIES + 1, "{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}")
-            )
-            + "]}}";
-        shapes.put("wrapper holding a hybrid with too many sub-queries", fused(new WrapperQueryBuilder(tooManySubQueries), termLeg()));
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-            when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-            query.rewrite(coordinatorContext);
-
-            assertEquals(shape.getKey() + ": the fused rewrite fanned out its legs", 1, registered.size());
-        }
-    }
-
-    /**
-     * A fused hybrid inside a [wrapper] or [template] sub-query of a hybrid without [fusion] is read without being rewritten,
-     * so it is refused as mixed nesting before its own rewrite could fan out.
-     */
-    @SneakyThrows
-    public void testClassicMode_whenFusedHybridIsInsideAWrapperOrTemplateSubQuery_thenRejectedBeforeAnyFanOut() {
-        String fusedJson = "{\"hybrid\":{\"fusion\":{},\"queries\":[{\"match\":{\"" + TEXT_FIELD_NAME + "\":\"hello\"}}]}}";
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put("wrapper", classic(new WrapperQueryBuilder(fusedJson), termLeg()));
-        shapes.put(
-            "template",
-            classic(
-                new TemplateQueryBuilder(
-                    Map.of("hybrid", Map.of("fusion", Map.of(), "queries", List.of(Map.of("match", Map.of(TEXT_FIELD_NAME, "hello")))))
-                ),
-                termLeg()
-            )
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-            when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(shape.getKey() + ": rejected before any fan-out", registered.isEmpty());
-        }
-    }
-
-    /**
-     * A template is read with the request's variables substituted, so a hybrid without [fusion] in a template whose
-     * variables sit where only the substituted value parses is still found. Without the variables the template cannot be
-     * read and is left to its own rewrite.
-     */
-    @SneakyThrows
-    public void testFusedMode_whenHybridWithoutFusionIsInsideATemplateLegWithVariables_thenRejectedBeforeAnyFanOut() {
-        Map<String, Object> boostedMatch = Map.of("match", Map.of(TEXT_FIELD_NAME, Map.of("query", "hello", "boost", "${boost}")));
-        HybridQueryBuilder query = fused(new TemplateQueryBuilder(Map.of("hybrid", Map.of("queries", List.of(boostedMatch)))), termLeg());
-
-        List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-        QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-        when(coordinatorContext.getXContentRegistry()).thenReturn(queryParsingRegistry());
-        when(coordinatorContext.getContextVariables()).thenReturn(Map.of("boost", 2.0f));
-
-        IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-        assertEquals(MIXED_NESTING_MESSAGE, error.getMessage());
-        assertTrue("rejected before any fan-out", registered.isEmpty());
-
-        List<BiConsumer<Client, ActionListener<?>>> registeredWithoutVariables = new ArrayList<>();
-        QueryCoordinatorContext contextWithoutVariables = coordinatorContext(request(query), registeredWithoutVariables);
-        when(contextWithoutVariables.getXContentRegistry()).thenReturn(queryParsingRegistry());
-
-        query.rewrite(contextWithoutVariables);
-        assertEquals("without the variables the template is left to its own rewrite", 1, registeredWithoutVariables.size());
-    }
-
-    /**
-     * The check descends by itself: [boosting] and [script_score] hand their query to the visitor without visiting it, so a
-     * walk that relied on each builder's own visit would not see a hybrid inside a [bool] below them.
-     */
-    @SneakyThrows
-    public void testMixedNestingCheck_whenTheOtherModeIsBelowABuilderThatDoesNotVisitItsQuery_thenRejected() {
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put(
-            "without fusion, in a bool below boosting in a leg",
-            fused(
-                QueryBuilders.boostingQuery(
-                    QueryBuilders.boolQuery().must(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg())),
-                    QueryBuilders.matchAllQuery()
-                ).negativeBoost(0.5f),
-                termLeg()
-            )
-        );
-        shapes.put(
-            "fused, in a bool below boosting in a sub-query",
-            classic(
-                QueryBuilders.boostingQuery(QueryBuilders.boolQuery().must(nestedChain(1)), QueryBuilders.matchAllQuery())
-                    .negativeBoost(0.5f),
-                termLeg()
-            )
-        );
-        shapes.put(
-            "fused, in a bool below script_score in a sub-query",
-            classic(QueryBuilders.scriptScoreQuery(QueryBuilders.boolQuery().must(nestedChain(1)), new Script("_score")), termLeg())
-        );
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(shape.getKey() + ": rejected before any fan-out", registered.isEmpty());
-        }
-    }
-
-    /** {@code neural_knn} exposes nothing to {@code visit}; the check reads its filter, so the other mode there is rejected. */
-    @SneakyThrows
-    public void testMixedNestingCheck_whenTheOtherModeIsInANeuralKnnFilter_thenRejected() {
-        Map<String, QueryBuilder> shapes = new LinkedHashMap<>();
-        shapes.put(
-            "without fusion, in the filter of a neural_knn leg",
-            fused(neuralKnn(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg())), termLeg())
-        );
-        shapes.put("fused, in the filter of a neural_knn sub-query", classic(neuralKnn(nestedChain(1)), termLeg()));
-        for (Map.Entry<String, QueryBuilder> shape : shapes.entrySet()) {
-            QueryBuilder query = shape.getValue();
-            List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
-            QueryCoordinatorContext coordinatorContext = coordinatorContext(request(query), registered);
-
-            IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> query.rewrite(coordinatorContext));
-
-            assertEquals(shape.getKey(), MIXED_NESTING_MESSAGE, error.getMessage());
-            assertTrue(String.format(Locale.ROOT, "%s: rejected before any fan-out", shape.getKey()), registered.isEmpty());
-        }
-    }
-
-    /**
-     * Fused nested in fused stays supported, and the check lets through a hybrid without [fusion] nested in another one,
-     * which the shard refuses as before.
-     */
-    @SneakyThrows
-    public void testMixedNestingCheck_whenBothLevelsHaveTheSameMode_thenNotRejected() {
-        FanOut fanOut = drive(request(nestedChain(2)));
-        assertEquals("the fused-in-fused body is accepted and fans out", 1, fanOut.multiSearches());
-
-        HybridQueryBuilder classic = classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg());
-        QueryBuilder rewritten = classic.rewrite(coordinatorContext(request(classic), new ArrayList<>()));
-        assertTrue(rewritten instanceof HybridQueryBuilder);
-        assertNull(((HybridQueryBuilder) rewritten).fusion());
-
-        HybridQueryBuilder classicInClassic = classic(classic(new MatchQueryBuilder(TEXT_FIELD_NAME, "hello"), termLeg()), termLeg());
-        QueryBuilder rewrittenNested = classicInClassic.rewrite(coordinatorContext(request(classicInClassic), new ArrayList<>()));
-        assertTrue(rewrittenNested instanceof HybridQueryBuilder);
-    }
-
     // ------------------------------------------------ harness ------------------------------------------------
 
     /** A chain {@code depth} fused hybrids deep, each holding the level below plus one term leg: 2 legs per level. */
@@ -1869,68 +1173,6 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         return fused(legs.toArray(new QueryBuilder[0]));
     }
 
-    /** Parses the queries the wrapper and template tests carry: hybrid, match and term. */
-    private NamedXContentRegistry queryParsingRegistry() {
-        return new NamedXContentRegistry(
-            List.of(
-                new NamedXContentRegistry.Entry(
-                    QueryBuilder.class,
-                    new ParseField(HybridQueryBuilder.NAME),
-                    HybridQueryBuilder::fromXContent
-                ),
-                new NamedXContentRegistry.Entry(
-                    QueryBuilder.class,
-                    new ParseField(MatchQueryBuilder.NAME),
-                    MatchQueryBuilder::fromXContent
-                ),
-                new NamedXContentRegistry.Entry(QueryBuilder.class, new ParseField(TermQueryBuilder.NAME), TermQueryBuilder::fromXContent)
-            )
-        );
-    }
-
-    private HybridQueryBuilder classic(final QueryBuilder... subQueries) {
-        HybridQueryBuilder hybrid = new HybridQueryBuilder();
-        for (QueryBuilder subQuery : subQueries) {
-            hybrid.add(subQuery);
-        }
-        return hybrid;
-    }
-
-    private QueryBuilder termLeg() {
-        return QueryBuilders.termQuery(TEXT_FIELD_NAME, "kw");
-    }
-
-    /** Every {@code neural} query's inference answers at once with the same vector. */
-    private void stubNeuralInference() {
-        MLCommonsClientAccessor mlClient = mock(MLCommonsClientAccessor.class);
-        doAnswer(invocation -> {
-            ActionListener<List<Number>> listener = invocation.getArgument(1);
-            listener.onResponse(List.of(1.0f, 2.0f));
-            return null;
-        }).when(mlClient).inferenceSentencesMap(any(), any());
-        NeuralQueryBuilder.initialize(mlClient);
-    }
-
-    /** A {@code neural_knn} with the given filter: the form a resolved {@code neural} leg runs as. */
-    private NeuralKNNQueryBuilder neuralKnn(final QueryBuilder filter) {
-        return NeuralKNNQueryBuilder.builder().fieldName("embedding").vector(new float[] { 1f, 2f }).k(10).filter(filter).build();
-    }
-
-    /** A leg reporting {@code writeableName} that rewrites into {@code resolved}, or is at its fixpoint when that is null. */
-    private QueryBuilder legNamed(final String writeableName, final QueryBuilder resolved) {
-        return new MatchQueryBuilder(TEXT_FIELD_NAME, "shoes") {
-            @Override
-            public String getWriteableName() {
-                return writeableName;
-            }
-
-            @Override
-            protected QueryBuilder doRewrite(final QueryRewriteContext context) {
-                return Objects.isNull(resolved) ? this : resolved;
-            }
-        };
-    }
-
     private HybridQueryBuilder fused(final QueryBuilder... legs) {
         HybridQueryBuilder hybrid = new HybridQueryBuilder();
         for (QueryBuilder leg : legs) {
@@ -1984,15 +1226,14 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
     @SneakyThrows
     private FanOut drive(final SearchRequest searchRequest, final Set<Integer> truncatedLegs) {
         List<Integer> legCountPerMultiSearch = new ArrayList<>();
-        List<LegSearches> issued = new ArrayList<>();
-        QueryCoordinatorContext coordinatorContext = fanningOutContext(searchRequest, legCountPerMultiSearch, issued, truncatedLegs);
+        QueryCoordinatorContext coordinatorContext = fanningOutContext(searchRequest, legCountPerMultiSearch, truncatedLegs);
 
         AtomicReference<QueryBuilder> settled = new AtomicReference<>();
         Rewriteable.rewriteAndFetch(searchRequest.source().query(), coordinatorContext, ActionListener.wrap(settled::set, e -> {
             throw new AssertionError("rewrite failed: " + e.getMessage(), e);
         }));
         assertNotNull("the rewrite never completed", settled.get());
-        return new FanOut(legCountPerMultiSearch, issued, settled.get());
+        return new FanOut(legCountPerMultiSearch, settled.get());
     }
 
     /**
@@ -2021,35 +1262,26 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         return settled.get();
     }
 
-    /** A coordinator context that answers every fan-out registered on it from {@link #legSearchingClient}, round by round. */
+    /** A coordinator context that answers every fan-out registered on it from {@link #multiSearchingClient}, round by round. */
     private QueryCoordinatorContext fanningOutContext(final SearchRequest searchRequest, final List<Integer> legCountPerMultiSearch) {
-        return fanningOutContext(searchRequest, legCountPerMultiSearch, new ArrayList<>(), Set.of());
+        return fanningOutContext(searchRequest, legCountPerMultiSearch, Set.of());
     }
 
     /** As above, with the given leg indexes answering the way a leg a soft {@code timeout} cut short does. */
     private QueryCoordinatorContext fanningOutContext(
         final SearchRequest searchRequest,
         final List<Integer> legCountPerMultiSearch,
-        final List<LegSearches> issued,
         final Set<Integer> truncatedLegs
     ) {
         List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
         QueryCoordinatorContext coordinatorContext = coordinatorContext(searchRequest, registered);
-        Client client = legSearchingClient(legCountPerMultiSearch, issued, truncatedLegs);
+        Client client = multiSearchingClient(legCountPerMultiSearch, truncatedLegs);
         when(coordinatorContext.hasAsyncActions()).thenAnswer(invocation -> registered.isEmpty() == false);
         doAnswer(invocation -> {
             List<BiConsumer<Client, ActionListener<?>>> thisRound = new ArrayList<>(registered);
             registered.clear();
             for (BiConsumer<Client, ActionListener<?>> action : thisRound) {
-                // One fan-out per registered action: the leg searches this action dispatches are grouped under it.
-                legCountPerMultiSearch.add(0);
-                issued.add(new LegSearches(new ArrayList<>()));
                 action.accept(client, ActionListener.wrap(response -> {}, e -> fail("leg fan-out failed: " + e.getMessage())));
-                if (legCountPerMultiSearch.get(legCountPerMultiSearch.size() - 1) == 0) {
-                    // An action that dispatched no leg is not a fan-out (nothing registers one today; stated, not relied on).
-                    legCountPerMultiSearch.remove(legCountPerMultiSearch.size() - 1);
-                    issued.remove(issued.size() - 1);
-                }
             }
             ActionListener<Object> roundListener = invocation.getArgument(0);
             roundListener.onResponse(null);
@@ -2058,32 +1290,20 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         return coordinatorContext;
     }
 
-    /**
-     * Answers every leg search with the same two hits, and records each under the fan-out currently open (the registered
-     * action being run, see {@link #fanningOutContext}; a client used outside one opens a group of its own). The legs run as
-     * individual searches since each is dispatched the moment it resolves; the group is what one MultiSearch used to carry.
-     */
-    private Client legSearchingClient(
-        final List<Integer> legCountPerMultiSearch,
-        final List<LegSearches> issued,
-        final Set<Integer> truncatedLegs
-    ) {
+    /** Answers every leg with the same two hits, and records how many legs each MultiSearch carried. */
+    private Client multiSearchingClient(final List<Integer> legCountPerMultiSearch, final Set<Integer> truncatedLegs) {
         Client client = mock(Client.class);
         doAnswer(invocation -> {
-            SearchRequest legRequest = invocation.getArgument(0);
-            if (issued.isEmpty()) {
-                legCountPerMultiSearch.add(0);
-                issued.add(new LegSearches(new ArrayList<>()));
+            MultiSearchRequest multiSearchRequest = invocation.getArgument(0);
+            legCountPerMultiSearch.add(multiSearchRequest.requests().size());
+            MultiSearchResponse.Item[] items = new MultiSearchResponse.Item[multiSearchRequest.requests().size()];
+            for (int leg = 0; leg < items.length; leg++) {
+                items[leg] = legItem(truncatedLegs.contains(leg));
             }
-            int group = issued.size() - 1;
-            int leg = issued.get(group).requests().size();
-            issued.get(group).requests().add(legRequest);
-            legCountPerMultiSearch.set(group, leg + 1);
-            MultiSearchResponse.Item item = legItem(truncatedLegs.contains(leg));
-            ActionListener<SearchResponse> listener = invocation.getArgument(1);
-            listener.onResponse(item.getResponse());
+            ActionListener<MultiSearchResponse> listener = invocation.getArgument(1);
+            listener.onResponse(new MultiSearchResponse(items, 10L));
             return null;
-        }).when(client).search(any(), any());
+        }).when(client).multiSearch(any(), any());
         return client;
     }
 
@@ -2140,9 +1360,12 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         when(nodes.getMinNodeVersion()).thenReturn(minNodeVersion);
         when(metadata.custom(SearchPipelineMetadata.TYPE)).thenReturn(new SearchPipelineMetadata(Map.of()));
         if (stubClusterSettings) {
-            // Fused mode is on by default, so the suite fans out on the real default; a test that wants the switch off
-            // (or on explicitly) passes its own settings.
-            Settings settings = Objects.isNull(clusterSettings) ? Settings.EMPTY : clusterSettings;
+            // Fused mode is an opt-in, so it has to be turned on for this suite to fan out at all. The
+            // caller's own settings are layered on top, which lets a test turn it back off.
+            Settings settings = Settings.builder()
+                .put(HYBRID_FUSION_ENABLED.getKey(), true)
+                .put(Objects.isNull(clusterSettings) ? Settings.EMPTY : clusterSettings)
+                .build();
             when(clusterService.getClusterSettings()).thenReturn(
                 new ClusterSettings(settings, Set.of(HYBRID_FUSION_ENABLED, MAX_FUSION_LEG_SEARCHES, HYBRID_FUSION_FAST_PATH_FETCH_BUDGET))
             );
@@ -2185,20 +1408,25 @@ public class HybridQueryFusedFanOutTests extends OpenSearchQueryTestCase {
         List<BiConsumer<Client, ActionListener<?>>> registered = new ArrayList<>();
         hybrid.rewrite(coordinatorContext(request, registered));
         assertEquals("one fan-out", 1, registered.size());
-        List<SearchRequest> legSearches = new ArrayList<>();
+        List<MultiSearchRequest> multiSearches = new ArrayList<>();
         Client client = mock(Client.class);
         doAnswer(invocation -> {
-            legSearches.add(invocation.getArgument(0));
+            MultiSearchRequest multiSearchRequest = invocation.getArgument(0);
+            multiSearches.add(multiSearchRequest);
             // answer every leg past the default threshold, so a consumer that is attached receives a derived total
-            SearchHit[] hits = new SearchHit[] { hit(0, "1", 0.9f), hit(1, "2", 0.5f) };
-            SearchHits searchHits = new SearchHits(hits, new TotalHits(10_000, TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO), 0.9f);
-            SearchResponseSections sections = new SearchResponseSections(searchHits, null, null, false, false, null, 0);
-            ActionListener<SearchResponse> listener = invocation.getArgument(1);
-            listener.onResponse(new SearchResponse(sections, null, 1, 1, 0, 10, null, null));
+            MultiSearchResponse.Item[] items = new MultiSearchResponse.Item[multiSearchRequest.requests().size()];
+            for (int leg = 0; leg < items.length; leg++) {
+                SearchHit[] hits = new SearchHit[] { hit(0, "1", 0.9f), hit(1, "2", 0.5f) };
+                SearchHits searchHits = new SearchHits(hits, new TotalHits(10_000, TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO), 0.9f);
+                SearchResponseSections sections = new SearchResponseSections(searchHits, null, null, false, false, null, 0);
+                items[leg] = new MultiSearchResponse.Item(new SearchResponse(sections, null, 1, 1, 0, 10, null, null), null);
+            }
+            ActionListener<MultiSearchResponse> listener = invocation.getArgument(1);
+            listener.onResponse(new MultiSearchResponse(items, 10L));
             return null;
-        }).when(client).search(any(), any());
+        }).when(client).multiSearch(any(), any());
         registered.getFirst().accept(client, ActionListener.wrap(response -> {}, e -> fail("leg fan-out failed: " + e.getMessage())));
-        return legSearches;
+        return multiSearches.getFirst().requests();
     }
 
     private static List<Integer> trackTotalHitsOf(final List<SearchRequest> legs) {
