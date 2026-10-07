@@ -62,9 +62,7 @@ import lombok.extern.log4j.Log4j2;
  * The same seam carries fused mode's coordinator-side reporting — per-leg profiling, {@code explain}, and a leg cut short
  * by a soft {@code timeout}: a fused hybrid runs its legs as sub-searches during the coordinator rewrite, and this is the
  * one place that both sees the query as the user submitted it and still owns the response listener, so it can hand the legs
- * somewhere to publish what they know and merge it into the response on the way out. It carries what fused mode changes
- * in the response itself the same way: a {@code hits.total} derived from the legs, a page assembled from them, and a page
- * kept to the documents fusion ranked. See {@link #attachFusedReporting}.
+ * somewhere to publish what they know and merge it into the response on the way out. See {@link #attachFusedReporting}.
  *
  */
 @Log4j2
@@ -151,25 +149,10 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
      *       request which cannot time out costs nothing.</li>
      * </ul>
      *
-     * <p>Three more consumers change the response itself rather than report on it, and attach only when the fused hybrid
-     * is the request's top-level query, since what each carries is the request's own count or page:
-     * <ul>
-     *   <li>{@code hits.total} derived from the legs — when the request wants a count beyond the window and its shape
-     *       leaves the Tail nothing else to do ({@link #mayDeriveTotalHitsFromLegs}).</li>
-     *   <li>the page assembled from the legs, the fast path — when the request's shape could be answered from the legs
-     *       alone ({@link #mayTakeFastPath}).</li>
-     *   <li>the page kept to the ranked window — when the request pages the fused ranking and round 2 may carry the Tail
-     *       ({@link #mayKeepThePageToTheRanking}).</li>
-     * </ul>
-     *
-     * <p>This runs before search request processors do, so it decides on the hybrids the request carries <b>as submitted,
-     * with {@code profile}, {@code explain}, {@code timeout} and the rest of the request's shape as submitted</b>. A
-     * pipeline that replaces or wraps the query — or changes any of them — is outside that boundary. For the reports, the
-     * request still answers correctly; it simply carries no fused detail. The totals and fast-path consumers re-check what
-     * they rely on at the rewrite and otherwise leave round 2 to answer. Whether the page is kept to the ranked window is
-     * decided here too, and that one shows in the page: a hybrid that core's {@code filter_query} wraps in a {@code bool},
-     * or a request whose sort or Tail a processor changes after this decided, can come back with round 2's page as it is,
-     * Tail-only documents at score {@code 0} included (see {@link #mayKeepThePageToTheRanking}).
+     * <p>This runs before search request processors do, so it reports the hybrids the request carries <b>as submitted, with
+     * {@code profile}, {@code explain} and {@code timeout} as submitted</b>. A pipeline that replaces the query — or changes
+     * any of them — is
+     * outside that boundary: the request still answers correctly, it simply carries no fused detail.
      */
     @SuppressWarnings("unchecked")
     private <Request extends ActionRequest, Response extends ActionResponse> ActionListener<Response> attachFusedReporting(
@@ -193,7 +176,6 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
         boolean rescored = Objects.nonNull(source.rescores()) && source.rescores().isEmpty() == false;
         boolean countsBeyondWindow = mayDeriveTotalHitsFromLegs(source);
         boolean fastPathShape = mayTakeFastPath(source);
-        boolean trimsToRankedPage = mayKeepThePageToTheRanking(source);
         // A profiled request keeps two rounds, but its page is the page its unprofiled twin would return, so it can teach
         // the fetch gate the same _source size — and its coordinator entry reports that twin's verdict, which is then
         // about a warmed gate on the next unprofiled request rather than a cold one (see FastPathDecision).
@@ -203,8 +185,7 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
             && explained == false
             && rescored == false
             && countsBeyondWindow == false
-            && fastPathShape == false
-            && trimsToRankedPage == false) {
+            && fastPathShape == false) {
             return listener;
         }
         FusedHybridFinder finder = new FusedHybridFinder();
@@ -280,20 +261,12 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
             hitsMerger = new FusedHitsMerger();
             finder.found.get(0).fusedHitsConsumer(hitsMerger.consumer());
         }
-        // A fused page ends at the ranked documents; like the two above, only for the request's own query, which
-        // mayKeepThePageToTheRanking already required the root to be — the finder visits it first, so it is found.get(0).
-        FusedRankedPageTrimmer rankedPageTrimmer = null;
-        if (trimsToRankedPage) {
-            rankedPageTrimmer = new FusedRankedPageTrimmer();
-            finder.found.get(0).fusedRankedPageConsumer(rankedPageTrimmer.consumer());
-        }
         final boolean guardInstalled = rescored && finder.found.get(0) == source.query();
         if (Objects.isNull(legProfileMerger)
             && Objects.isNull(timeoutMerger)
             && Objects.isNull(explanationMerger)
             && Objects.isNull(totalHitsMerger)
             && Objects.isNull(hitsMerger)
-            && Objects.isNull(rankedPageTrimmer)
             && guardInstalled == false) {
             return listener;
         }
@@ -302,7 +275,6 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
         final FusedExplanationMerger explanations = explanationMerger;
         final FusedTotalHitsMerger totals = totalHitsMerger;
         final FusedHitsMerger assembled = hitsMerger;
-        final FusedRankedPageTrimmer rankedPage = rankedPageTrimmer;
         return ActionListener.wrap(response -> {
             if ((response instanceof SearchResponse) == false) {
                 listener.onResponse(response);
@@ -313,13 +285,6 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
             // legs is the response's hits. On the two-round path nothing was assembled and this is a no-op.
             if (Objects.nonNull(assembled)) {
                 merged = assembled.getMergedResponse(merged);
-            }
-            // Then, still before anything annotates hits: drop the Tail-only documents round 2 put on a page reaching past
-            // the ranked window, so every later step sees the hits that are returned. A no-op on an assembled page. The
-            // search pipeline's response processors are not among those steps: core ran them before this listener, on
-            // round 2's page as it was (see FusedRankedPageTrimmer).
-            if (Objects.nonNull(rankedPage)) {
-                merged = rankedPage.getMergedResponse(merged);
             }
             // One rebuild carrying both overrides, rather than one per report: each rebuild has to re-pass every field of
             // the response it is replacing, so chaining them would multiply the places a newly-added core field could be
@@ -360,40 +325,6 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
             }
             listener.onResponse((Response) merged);
         }, listener::onFailure);
-    }
-
-    /**
-     * Whether the request's page may have to be kept to a fused hybrid's ranked window: its top-level query is a fused
-     * hybrid, the request pages the fused ranking ({@code HybridQueryBuilder#requestPagesTheFusedRanking}), and round 2
-     * may carry the Tail, the only way a document fusion did not rank reaches the page
-     * ({@code HybridQueryBuilder#requestShapeMayKeepTheTail}) — a Top-only request's page holds ranked documents alone, so
-     * leaving it out costs nothing.
-     *
-     * <p>Decided on the request as submitted, and only the first two conditions are re-checked, by the rewrite, on the
-     * request core executes. A search request processor that takes either away between here and there — core's
-     * {@code filter_query} wraps the hybrid, or a processor sorts by a field — therefore leaves the page as round 2
-     * returns it, as it would for the same request submitted in that shape. The third is read here alone: a processor that
-     * adds the Tail after this declined — sets {@code track_total_hits}, adds an aggregation — leaves Tail-only documents
-     * at score {@code 0} on the page, since nothing was attached for the rewrite to publish to, and so does one that
-     * supplies either of the first two after this declined (drops a field sort). One that takes the Tail away leaves a
-     * trimmer with nothing to drop.
-     *
-     * <p>A fused hybrid that is a direct leg of an enclosing fused hybrid is the top-level query of its own leg sub-search,
-     * which re-enters this filter (see {@link FusedHybridFinder}), so it is gated here too. Its leg request has no sort,
-     * aggregation, highlight or collapse, and counts totals only when the enclosing rewrite asked its legs to: then its
-     * round 2 may keep the Tail and its page is trimmed; otherwise it is Top-only. Either way the enclosing fusion is
-     * handed the nested ranking alone. A fused hybrid inside a container query — at the request's root or in a leg — is
-     * not the top-level query and is not trimmed: the container decides which of its hits match and how they score, so
-     * the ranked window is not the page's ranking.
-     */
-    private static boolean mayKeepThePageToTheRanking(final SearchSourceBuilder source) {
-        if ((source.query() instanceof HybridQueryBuilder) == false) {
-            return false;
-        }
-        HybridQueryBuilder hybrid = (HybridQueryBuilder) source.query();
-        return Objects.nonNull(hybrid.fusion())
-            && HybridQueryBuilder.requestPagesTheFusedRanking(source)
-            && HybridQueryBuilder.requestShapeMayKeepTheTail(source);
     }
 
     /**
@@ -449,9 +380,7 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
      * a leg sub-search as much as to any other search and is <b>not</b> covered here: it is unset by default, and consulting
      * it means holding cluster settings and re-reading them per request on a path whose whole justification is that it is
      * free. A cluster that sets it and a request that relies on it will see the response's own {@code timed_out} for round 2
-     * and no fused contribution. The gap shows in the page as well as in the flag: a leg the cluster default truncated
-     * narrows the ranked window, and because a fused page ends at its ranked documents, a page reaching past them can come
-     * back short or empty with {@code timed_out: false}, which reads exactly like the end of the ranking.
+     * and no fused contribution — the behavior as it stands today, not a new gap.
      */
     private static boolean mayHitASoftTimeout(final SearchSourceBuilder source) {
         return Objects.nonNull(source.timeout());
@@ -466,11 +395,10 @@ public class HybridQuerySearchRequestFilter implements ActionFilter {
      * that one, and a leg sub-search is a search action of its own: it re-enters this filter, gets its own merger, and
      * labels its legs itself, so the outer request must not number it too. That is what makes {@code hybrid_N} mean "the
      * Nth fused hybrid this request fans out" — a contiguous numbering over siblings, with nesting expressed by the label
-     * path a leg's entries carry rather than by the index. Classic hybrids are walked through, since they fan nothing out;
-     * one that holds a fused hybrid is refused later, in its own rewrite, and this walk runs before that. Stopping is only
-     * sound while this visitor owns the whole descent, so it has to be entered by handing the query to {@link #accept} —
-     * {@code query.visit(finder)} would let the query's own {@code visit} carry on into its children after {@code accept}
-     * declined to.
+     * path a leg's entries carry rather than by the index. Classic hybrids are walked through, since they fan nothing out
+     * and may still contain a fused one. Stopping is only sound while this visitor owns the whole descent, so it has to be
+     * entered by handing the query to {@link #accept} — {@code query.visit(finder)} would let the query's own {@code visit}
+     * carry on into its children after {@code accept} declined to.
      */
     private static final class FusedHybridFinder implements QueryBuilderVisitor {
         private final Set<QueryBuilder> entered = Collections.newSetFromMap(new IdentityHashMap<>());
