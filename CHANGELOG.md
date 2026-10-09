@@ -21,12 +21,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * [Ingest Processors] Pass `_routing` to the `skip_existing` lookup so writes to indices with required or custom routing no longer fail or silently re-embed ([#2024](https://github.com/opensearch-project/neural-search/issues/2024))
 * [Semantic Field] Fix the semantic field processor invoking the ingest handler twice on embedding-generation failure, which indexed the document without its embedding instead of failing the write ([#2033](https://github.com/opensearch-project/neural-search/pull/2033))
 * [Semantic Field] Pass `_routing` to the `skip_existing_embedding` lookup so unchanged documents in routed indices reuse their embeddings instead of being silently re-embedded ([#2040](https://github.com/opensearch-project/neural-search/pull/2040))
-* [Hybrid Query] Reject sorting a hybrid query by `_score` more than once, or by ascending `_score` without `collapse`, which returned wrong documents and scores ([#2046](https://github.com/opensearch-project/neural-search/pull/2046))
-* [Hybrid Query] Fix hybrid query failing with a `ClassCastException` when a point in time `slice` or an alias filter excludes a shard ([#2045](https://github.com/opensearch-project/neural-search/pull/2045))
-* [Ingest Processors] Fix `field_map` entries sharing the same first dotted path segment (e.g. `author.name` and `author.bio`) overwriting each other, which silently dropped embeddings for all but the last field ([#2052](https://github.com/opensearch-project/neural-search/pull/2052))
-* [Hybrid Query] Reject a hybrid query without `fusion` nested in a hybrid query with `fusion`, and the other way around ([#2051](https://github.com/opensearch-project/neural-search/pull/2051))
-* [Ingest Processors] Deep-merge `field_map` target maps so sibling keys that diverge below the first path segment (e.g. `author.name.first` and `author.name.last`) are no longer dropped ([#2054](https://github.com/opensearch-project/neural-search/pull/2054))
-* [Semantic Field] Stop logging the full ingest document on chunking or model-info failure; log only the document `_id` and `_index` so customer content is no longer written to service logs ([#2057](https://github.com/opensearch-project/neural-search/pull/2057))
 
 ### Infrastructure
 
