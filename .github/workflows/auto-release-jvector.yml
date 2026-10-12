@@ -7,11 +7,19 @@ name: Releases (JVector)
 #
 # Uses only GitHub-owned actions, the preinstalled gh CLI and the built-in
 # GITHUB_TOKEN, so it needs no GitHub App, APP_ID or APP_PRIVATE_KEY secrets.
+#
+# workflow_dispatch builds and releases an EXISTING tag, for testing on a fork.
 
 on:
   push:
     tags:
       - '*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (x.x.x.x)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,9 +27,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
           # jni/external/neural-sparse-cpp is a submodule the native build needs
           submodules: recursive
 
@@ -35,7 +46,7 @@ jobs:
       # build.gradle appends ".0" itself, so Gradle needs 3.9.0 for tag 3.9.0.0
       - name: Get OpenSearch version from tag
         id: version
-        run: echo "opensearch_version=${GITHUB_REF_NAME%.*}" >> "$GITHUB_OUTPUT"
+        run: echo "opensearch_version=${TAG%.*}" >> "$GITHUB_OUTPUT"
 
       - name: Assemble plugin ZIP
         run: ./gradlew assemble -Dopensearch.version=${{ steps.version.outputs.opensearch_version }} -Dbuild.snapshot=false
@@ -44,7 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NOTES="release-notes/opensearch-neural-search.release-notes-${GITHUB_REF_NAME}.md"
+          NOTES="release-notes/opensearch-neural-search.release-notes-${TAG}.md"
           NOTES_ARGS=(--generate-notes)
           if [ -f "$NOTES" ]; then
             NOTES_ARGS=(--notes-file "$NOTES")
@@ -57,9 +68,10 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if gh release view "$TAG" >/dev/null 2>&1; then
             # Release was already created manually; just attach the ZIP
-            gh release upload "$GITHUB_REF_NAME" "${ZIPS[@]}" --clobber
+            gh release upload "$TAG" "${ZIPS[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${ZIPS[@]}" --title "$GITHUB_REF_NAME" "${NOTES_ARGS[@]}"
+            # --verify-tag: fail instead of creating a new tag from the default branch
+            gh release create "$TAG" "${ZIPS[@]}" --title "$TAG" --verify-tag "${NOTES_ARGS[@]}"
           fi
