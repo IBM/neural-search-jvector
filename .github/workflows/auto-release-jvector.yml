@@ -68,10 +68,30 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Release was already created manually; just attach the ZIP
-            gh release upload "$TAG" "${ZIPS[@]}" --clobber
-          else
+          # Retry on transient GitHub API errors (e.g. 504 Gateway Timeout)
+          MAX_RETRIES=3
+          retry() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$MAX_RETRIES" ]; then
+                echo "Failed after $MAX_RETRIES attempts: $*" >&2
+                return 1
+              fi
+              echo "GitHub API failed. Retrying in 15 seconds... ($attempt/$MAX_RETRIES)"
+              sleep 15
+              attempt=$((attempt + 1))
+            done
+          }
+
+          # Create the release without files, then upload separately. gh creates a
+          # draft when files are attached to `release create`; a failed upload would
+          # leave a draft that `release view` cannot see, and a retry would duplicate it.
+          ensure_release() {
+            # Skip if it exists (created manually or by an earlier attempt)
+            gh release view "$TAG" >/dev/null 2>&1 && return 0
             # --verify-tag: fail instead of creating a new tag from the default branch
-            gh release create "$TAG" "${ZIPS[@]}" --title "$TAG" --verify-tag "${NOTES_ARGS[@]}"
-          fi
+            gh release create "$TAG" --title "$TAG" --verify-tag "${NOTES_ARGS[@]}"
+          }
+
+          retry ensure_release
+          retry gh release upload "$TAG" "${ZIPS[@]}" --clobber
