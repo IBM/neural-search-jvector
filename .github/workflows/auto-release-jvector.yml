@@ -7,19 +7,11 @@ name: Releases (JVector)
 #
 # Uses only GitHub-owned actions, the preinstalled gh CLI and the built-in
 # GITHUB_TOKEN, so it needs no GitHub App, APP_ID or APP_PRIVATE_KEY secrets.
-#
-# workflow_dispatch builds and releases an EXISTING tag, for testing on a fork.
 
 on:
   push:
     tags:
       - '*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing tag to release (x.x.x.x)'
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -28,11 +20,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: refs/tags/${{ inputs.tag || github.ref_name }}
           # jni/external/neural-sparse-cpp is a submodule the native build needs
           submodules: recursive
 
