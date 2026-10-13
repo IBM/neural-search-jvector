@@ -375,10 +375,9 @@ public abstract class InferenceProcessor extends AbstractBatchingProcessor {
             if (targetKey instanceof Map) {
                 Map<String, Object> treeRes = new LinkedHashMap<>();
                 buildNestedMap(originalKey, targetKey, sourceAndMetadataMap, treeRes);
-                // Multiple flat field_map entries can share the same leading path segment, e.g.
-                // "author.name" and "author.bio" (and even "author.name.first"/"author.name.last").
-                // Deep-merge their nested target maps instead of overwriting, so sibling keys at any
-                // depth aren't dropped. See REMAPPING_FUNCTION / remappingFunction.
+                // Multiple flat field_map entries can share the same first path segment, e.g.
+                // "author.name" and "author.bio" both resolve to originalKey "author". Merge
+                // their nested target maps instead of overwriting, so sibling keys aren't dropped.
                 mapWithProcessorKeys.merge(originalKey, treeRes.get(originalKey), REMAPPING_FUNCTION);
             } else {
                 mapWithProcessorKeys.put(String.valueOf(targetKey), normalizeSourceValue(sourceAndMetadataMap.get(originalKey)));
