@@ -299,18 +299,7 @@ public class HybridQueryDlsIT extends BaseNeuralSearchIT {
         return responseAsMap(response);
     }
 
-    /** A fused-mode (in-query {@code fusion}) request: no search pipeline, the coordinator fuses the legs itself. */
-    private Map<String, Object> performFusedSearch(String requestBody, boolean asDlsUser) throws IOException {
-        Response response = performRequest(requestBody, asDlsUser, false);
-        assertEquals(RestStatus.OK.getStatus(), response.getStatusLine().getStatusCode());
-        return responseAsMap(response);
-    }
-
     private Response performRequest(String requestBody, boolean asDlsUser) throws IOException {
-        return performRequest(requestBody, asDlsUser, true);
-    }
-
-    private Response performRequest(String requestBody, boolean asDlsUser, boolean withSearchPipeline) throws IOException {
         Request request = new Request("POST", "/" + INDEX_NAME + "/_search");
         if (withSearchPipeline) {
             request.addParameter("search_pipeline", SEARCH_PIPELINE_NAME);
