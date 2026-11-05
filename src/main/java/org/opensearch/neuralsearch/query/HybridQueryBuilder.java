@@ -25,10 +25,7 @@ import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TotalHits;
-import org.opensearch.ExceptionsHelper;
-import org.opensearch.OpenSearchStatusException;
 import org.opensearch.Version;
-import org.opensearch.action.search.MultiSearchRequest;
 import org.opensearch.action.search.MultiSearchResponse;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
@@ -47,6 +44,7 @@ import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.core.xcontent.XContentBuilder;
+import org.opensearch.core.xcontent.XContentLocation;
 import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.query.AbstractQueryBuilder;
@@ -57,6 +55,7 @@ import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.index.query.QueryCoordinatorContext;
 import org.opensearch.index.query.QueryRewriteContext;
 import org.opensearch.index.query.QueryShardContext;
+import org.opensearch.index.query.Rewriteable;
 import org.opensearch.index.query.QueryShardException;
 import org.opensearch.index.query.TemplateQueryBuilder;
 import org.opensearch.index.query.WrapperQueryBuilder;
@@ -66,6 +65,7 @@ import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.sort.ScoreSortBuilder;
 import org.opensearch.search.sort.SortBuilder;
 import org.opensearch.search.sort.SortOrder;
+import org.opensearch.transport.client.Client;
 
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -98,6 +98,7 @@ import static org.opensearch.neuralsearch.common.MinClusterVersionUtil.isCluster
 import static org.opensearch.neuralsearch.common.MinClusterVersionUtil.isVersionOnOrAfterMinReqVersionForFusedModeInHybridQuery;
 import org.opensearch.neuralsearch.processor.combination.GeometricMeanScoreCombinationTechnique;
 import org.opensearch.neuralsearch.processor.combination.HarmonicMeanScoreCombinationTechnique;
+import org.opensearch.neuralsearch.processor.combination.ScoreCombinationUtil;
 
 /**
  * Class abstract creation of a Query type "hybrid". Hybrid query will allow execution of multiple sub-queries and
@@ -115,10 +116,19 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     private static final ParseField FILTER_FIELD = new ParseField("filter");
     private static final ParseField PAGINATION_DEPTH_FIELD = new ParseField("pagination_depth");
     private static final ParseField FUSION_FIELD = new ParseField("fusion");
+    private static final String WEIGHTS_KEY = "weights";
+    private static final ParseField WEIGHTS_FIELD = new ParseField(WEIGHTS_KEY);
 
     private final List<QueryBuilder> queries = new ArrayList<>();
 
     private Integer paginationDepth;
+
+    /**
+     * Request-level combination weights, one per {@link #queries} entry. The field belongs to the hybrid query and has
+     * the same meaning in both execution modes: classic phase-results processing and fused coordinator rewrite each
+     * create an immutable per-request combination technique without mutating the configured pipeline.
+     */
+    private List<Float> weights;
 
     /**
      * Resolver (fused) mode config: the raw inline {@code fusion} block from the query body. Its <b>presence</b> is the
@@ -144,7 +154,7 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     /**
      * Fusion config projected onto this builder by an <b>enclosing</b> fused hybrid, when this builder is one of its legs.
      * A leg sub-search runs with the search pipeline pinned to {@code _none} (see
-     * {@link HybridFusionOrchestrator#buildLegMultiSearch}), so a nested fused hybrid cannot resolve its own config from
+     * {@link CandidateScope#newLegRequest}), so a nested fused hybrid cannot resolve its own config from
      * the leg request; the enclosing rewrite hands down the config it already resolved from the user's request instead.
      * Only ever set on a private copy made by {@link #withResolvedFusionSpec}, never parsed, never serialized, and
      * deliberately absent from {@link #doEquals}/{@link #doHashCode} — exactly like {@link #fusedSupplier}.
@@ -162,6 +172,18 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     @Getter(AccessLevel.NONE)
     @Setter(AccessLevel.NONE)
     private FusedRescoreScope fusedRescoreScope;
+
+    /**
+     * Set on a copy once the coordinator has accepted the request-level options of the builder it was made from, so the
+     * rewrite rounds that follow — the rebuilt classic builder, the fused marker — do not repeat
+     * {@link #requireValidRequestOptions}: a classic hybrid with a {@code neural} leg rewrites at least twice, and the
+     * answer cannot change between rounds of one request. Carried by {@link #copyRequestOptionsTo} to those two copies and
+     * cleared on a nested-leg copy, which its own leg request validates. Never parsed, never serialized, absent from
+     * {@link #doEquals}/{@link #doHashCode}, like {@link #fusedSupplier}.
+     */
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    private boolean requestOptionsAccepted;
 
     /**
      * Where to publish this fused hybrid's leg profile trees. The setter is {@code HybridQuerySearchRequestFilter}'s attach
@@ -244,6 +266,7 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     public static final int MAX_NUMBER_OF_SUB_QUERIES = 5;
     private static final int LOWER_BOUND_OF_PAGINATION_DEPTH = 0;
     private static final int DEFAULT_FUSION_WINDOW_SIZE = 100;
+    private static final ScoreCombinationUtil SCORE_COMBINATION_UTIL = new ScoreCombinationUtil();
     /** The one clause the Tail filter takes in the self-erased bool, alongside one should-clause per ranked doc. */
     private static final int TAIL_CLAUSE_RESERVE = 1;
 
@@ -252,6 +275,8 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     private static final String FUSION_KEY_NORMALIZATION = "normalization";
     private static final String FUSION_KEY_COMBINATION = "combination";
     private static final String FUSION_KEY_WINDOW_SIZE = "window_size";
+    /** {@code combination.parameters}, the clause the long-form weights live under. */
+    private static final String FUSION_KEY_PARAMETERS = "parameters";
     private static final String FUSION_SOURCE_PIPELINE = "pipeline";
 
     // Error message templates for reuse across REST and gRPC paths
@@ -270,10 +295,15 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         if (isClusterOnOrAfterMinReqVersionForPaginationInHybridQuery()) {
             paginationDepth = in.readOptionalInt();
         }
-        // Gate the fused-mode field on the actual peer stream version (not the cluster-min-version singleton) so the
+        // Gate the fused-mode fields on the actual peer stream version (not the cluster-min-version singleton) so the
         // read format matches exactly what the writing node wrote, regardless of singleton state at this instant.
-        if (isVersionOnOrAfterMinReqVersionForFusedModeInHybridQuery(in.getVersion()) && in.readBoolean()) {
-            fusion = in.readMap();
+        if (isVersionOnOrAfterMinReqVersionForFusedModeInHybridQuery(in.getVersion())) {
+            if (in.readBoolean()) {
+                fusion = in.readMap();
+            }
+            if (in.readBoolean()) {
+                weights = Collections.unmodifiableList(in.readList(StreamInput::readFloat));
+            }
         }
     }
 
@@ -288,13 +318,18 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         if (isClusterOnOrAfterMinReqVersionForPaginationInHybridQuery()) {
             out.writeOptionalInt(paginationDepth);
         }
-        // Gate the fused-mode field on the actual peer stream version so the wire format is symmetric with the reader.
+        // Gate the fused-mode fields on the actual peer stream version so the wire format is symmetric with the reader.
         if (isVersionOnOrAfterMinReqVersionForFusedModeInHybridQuery(out.getVersion())) {
             // Presence flag then the map — absence writes only a false boolean, keeping the classic wire form compact.
             boolean hasFusion = Objects.nonNull(fusion);
             out.writeBoolean(hasFusion);
             if (hasFusion) {
                 out.writeMap(fusion);
+            }
+            boolean hasWeights = Objects.nonNull(weights);
+            out.writeBoolean(hasWeights);
+            if (hasWeights) {
+                out.writeCollection(weights, StreamOutput::writeFloat);
             }
         }
     }
@@ -349,6 +384,9 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         // TODO https://github.com/opensearch-project/neural-search/issues/1097
         if (Objects.nonNull(paginationDepth)) {
             builder.field(PAGINATION_DEPTH_FIELD.getPreferredName(), paginationDepth);
+        }
+        if (Objects.nonNull(weights)) {
+            builder.field(WEIGHTS_FIELD.getPreferredName(), weights);
         }
         if (Objects.nonNull(fusion)) {
             builder.field(FUSION_FIELD.getPreferredName(), fusion);
@@ -434,6 +472,8 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
 
         Integer paginationDepth = null;
         Map<String, Object> fusion = null;
+        List<?> requestWeights = null;
+        XContentLocation requestWeightsLocation = null;
         final List<QueryBuilder> queries = new ArrayList<>();
         QueryBuilder filter = null;
         String queryName = null;
@@ -450,6 +490,8 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                     filter = parseInnerQueryBuilder(parser);
                 } else if (FUSION_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     fusion = parser.map();
+                } else if (WEIGHTS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                    throw new ParsingException(parser.getTokenLocation(), weightsMessage(FusionSpec.WEIGHTS_MUST_BE_NUMBERS));
                 } else {
                     throwUnsupportedFieldParsingException(parser, currentFieldName);
                 }
@@ -465,6 +507,11 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                         queries.add(parseInnerQueryBuilder(parser));
                         token = parser.nextToken();
                     }
+                } else if (WEIGHTS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                    // Checked after the loop, once the sub-query count is known. The location is kept so the refusal
+                    // points at this field rather than at the end of the object.
+                    requestWeightsLocation = parser.getTokenLocation();
+                    requestWeights = parser.list();
                 } else if (FILTER_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     throwUnsupportedFilterParsingException(parser);
                 } else {
@@ -502,6 +549,12 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                     Map<String, Object> normalized = new HashMap<>();
                     normalized.put(FUSION_KEY_SOURCE, source);
                     fusion = normalized;
+                } else if (WEIGHTS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                    // An explicit null is the key left out — how a client that serializes every optional field writes
+                    // "no request weights". Any other scalar is a malformed list.
+                    if (token != XContentParser.Token.VALUE_NULL) {
+                        throw new ParsingException(parser.getTokenLocation(), weightsMessage(FusionSpec.WEIGHTS_MUST_BE_NUMBERS));
+                    }
                 } else if (FILTER_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     throwUnsupportedFilterParsingException(parser);
                 } else {
@@ -517,10 +570,19 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         if (Objects.nonNull(fusion)) {
             validateFusion(fusion, paginationDepth, parser);
         }
+        List<Float> parsedWeights = null;
+        if (Objects.nonNull(requestWeights)) {
+            try {
+                parsedWeights = requireValidWeights(requestWeights, queries.size(), fusion);
+            } catch (IllegalArgumentException e) {
+                throw new ParsingException(requestWeightsLocation, e.getMessage(), e);
+            }
+        }
 
         HybridQueryBuilder compoundQueryBuilder = new HybridQueryBuilder();
         compoundQueryBuilder.queryName(queryName);
         compoundQueryBuilder.boost(boost);
+        compoundQueryBuilder.weights(parsedWeights);
         compoundQueryBuilder.fusion(fusion);
         if (isClusterOnOrAfterMinReqVersionForPaginationInHybridQuery()) {
             compoundQueryBuilder.paginationDepth(paginationDepth);
@@ -608,6 +670,13 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     }
 
     protected QueryBuilder doRewrite(QueryRewriteContext queryShardContext) throws IOException {
+        // Where the request is accepted: on the coordinator, on the round that first sees the builder. A shard only receives
+        // what a coordinator accepted, and core rewrites before toQuery, so nothing downstream needs the check again; the
+        // copies the rounds after run on are marked accepted by copyRequestOptionsTo.
+        QueryCoordinatorContext coordinatorContext = queryShardContext.convertToCoordinatorContext();
+        if (Objects.nonNull(coordinatorContext) && requestOptionsAccepted == false) {
+            requireValidRequestOptions(coordinatorContext);
+        }
         // Resolver (fused) mode self-erases at the coordinator into a standard query (see doRewriteFused). Classic mode
         // keeps the existing per-sub-query rewrite below.
         if (Objects.nonNull(fusion)) {
@@ -626,15 +695,160 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
             newBuilder.add(result);
         }
         if (changed) {
-            newBuilder.queryName(queryName);
-            newBuilder.boost(boost);
-            if (isClusterOnOrAfterMinReqVersionForPaginationInHybridQuery()) {
-                newBuilder.paginationDepth(paginationDepth);
-            }
+            copyRequestOptionsTo(newBuilder);
             return newBuilder;
         } else {
             return this;
         }
+    }
+
+    /**
+     * Every per-query option a copy of this builder carries, in one place, so that the next one is added here and cannot be
+     * missed at one of the copy sites — the silent-drop class of bug a request-level option has to guard against. The
+     * copies: the classic rebuild in {@link #doRewrite}, the fused marker in {@link #doRewriteFused}, and
+     * {@link #withResolvedFusionSpec}. The sub-queries and the never-serialized round-1 state are each site's own business.
+     */
+    private void copyRequestOptionsTo(final HybridQueryBuilder target) {
+        target.queryName(queryName);
+        target.boost(boost);
+        if (isClusterOnOrAfterMinReqVersionForPaginationInHybridQuery()) {
+            target.paginationDepth(paginationDepth);
+        }
+        target.weights(weights);
+        target.fusion(fusion);
+        // A copy is only ever made by a coordinator rewrite that has just run, or inherited, the acceptance. The nested-leg
+        // copy clears this (see withResolvedFusionSpec).
+        target.requestOptionsAccepted = true;
+    }
+
+    /**
+     * The request-level options as a builder assembled in code — or read off the wire — carries them, checked where the
+     * request is accepted. REST parsing has already refused an ordinary request's malformed {@code fusion} keys and
+     * {@code weights} with a {@link ParsingException}; this repeats the same rules for the other constructors and adds
+     * the two checks only the coordinator can make for classic {@code weights}: they must sit on the request's top-level
+     * query, and a phase-results processor must be there to read them — otherwise they would be silently ignored at
+     * HTTP 200.
+     */
+    private void requireValidRequestOptions(final QueryCoordinatorContext coordinatorContext) {
+        if (Objects.nonNull(fusion)) {
+            String unknownKey = firstUnknownFusionKey(fusion);
+            if (Objects.nonNull(unknownKey)) {
+                throw new IllegalArgumentException(unknownFusionKeyMessage(unknownKey));
+            }
+        }
+        if (Objects.isNull(weights)) {
+            return;
+        }
+        requireValidWeights(weights, queries.size(), fusion);
+        if (Objects.isNull(fusion)) {
+            requireRequestTopLevelQuery(coordinatorContext);
+            requireScoreHybridizationProcessor(coordinatorContext);
+        }
+    }
+
+    /**
+     * Classic weights are read from the request's top-level query and from nowhere else
+     * ({@link HybridQueryUtil#classicRequestWeights}), so a weighted classic hybrid anywhere else in the request — a
+     * {@code post_filter}, an aggregation's filter, a rescore query, a clause of another query — would have them silently
+     * ignored. Refused instead. Compared against the request's query by identity (or equality, for a copy): core installs
+     * the rewritten source on the request only after the last round, so on the round that first sees a builder the request
+     * still holds the very object that was parsed, and the rounds after run on a copy already marked accepted. That parsed
+     * object may be a {@code wrapper} or {@code template} holding the hybrid; those are read through
+     * ({@link #resolveHeldQuery}), because the request's query becomes what they hold.
+     */
+    private void requireRequestTopLevelQuery(final QueryCoordinatorContext coordinatorContext) {
+        if ((coordinatorContext.getSearchRequest() instanceof SearchRequest) == false) {
+            return;
+        }
+        SearchSourceBuilder source = ((SearchRequest) coordinatorContext.getSearchRequest()).source();
+        QueryBuilder requestQuery = Objects.isNull(source) ? null : resolveHeldQuery(source.query(), coordinatorContext);
+        if (requestQuery == this || this.equals(requestQuery)) {
+            return;
+        }
+        throw new IllegalArgumentException(
+            String.format(
+                Locale.ROOT,
+                "[%s] query [%s] only apply to the request's top-level [%s] query: a [%s] query carrying them anywhere else — a "
+                    + "post_filter, an aggregation filter, a rescore query, a clause of another query, whether written there or "
+                    + "moved there by a search request processor — has nothing that reads them",
+                NAME,
+                WEIGHTS_FIELD.getPreferredName(),
+                NAME,
+                NAME
+            )
+        );
+    }
+
+    /**
+     * What the request's top-level query becomes once the holders around it rewrite: a {@code wrapper} is parsed, a
+     * {@code template} is rendered with the request's variables, until something else is reached — the same reading
+     * {@link NestedHybridModeFinder} does. Core installs that result as the request's query, which is where
+     * {@link HybridQueryUtil#classicRequestWeights} reads at phase-results time, so it is what a weighted hybrid is compared
+     * with. A wrapper carrying its own boost or name rewrites into a {@code bool} around what it holds, so it resolves to
+     * itself (the hybrid will not be top-level); so does a holder that cannot be read, whose own rewrite reports why.
+     */
+    private static QueryBuilder resolveHeldQuery(final QueryBuilder query, final QueryRewriteContext context) {
+        QueryBuilder current = query;
+        for (int depth = 0; depth < Rewriteable.MAX_REWRITE_ROUNDS; depth++) {
+            boolean plainWrapper = current instanceof WrapperQueryBuilder
+                && current.boost() == DEFAULT_BOOST
+                && Objects.isNull(current.queryName());
+            if (plainWrapper == false && (current instanceof TemplateQueryBuilder) == false) {
+                return current;
+            }
+            try {
+                current = readHeldQuery(current, context);
+            } catch (IOException | RuntimeException e) {
+                return current;
+            }
+        }
+        return current;
+    }
+
+    /**
+     * The query a {@code wrapper} or {@code template} holds, read without rewriting it: the wrapper's source is parsed, the
+     * template's own rewrite substitutes the request's variables and parses the result.
+     */
+    private static QueryBuilder readHeldQuery(final QueryBuilder holder, final QueryRewriteContext context) throws IOException {
+        if (holder instanceof TemplateQueryBuilder) {
+            return holder.rewrite(context);
+        }
+        byte[] source = ((WrapperQueryBuilder) holder).source();
+        try (
+            XContentParser parser = MediaTypeRegistry.xContent(source)
+                .xContent()
+                .createParser(context.getXContentRegistry(), LoggingDeprecationHandler.INSTANCE, source)
+        ) {
+            return parseInnerQueryBuilder(parser);
+        }
+    }
+
+    /**
+     * Classic mode combines in the attached pipeline's {@code normalization-processor} or {@code score-ranker-processor},
+     * which is what reads top-level {@code hybrid.weights}; without one the request would return raw, unweighted scores
+     * at HTTP 200 as if the key were absent. Refused the way {@code fusion: "pipeline"} refuses a pipeline it cannot fuse
+     * from. Only the coordinator knows the pipeline, so this runs there; see
+     * {@link FusionConfigResolver#resolvedPipelineHasScoreHybridizationProcessor} for what it can and cannot see.
+     */
+    private static void requireScoreHybridizationProcessor(final QueryCoordinatorContext coordinatorContext) {
+        if ((coordinatorContext.getSearchRequest() instanceof SearchRequest) == false) {
+            return;
+        }
+        SearchRequest searchRequest = (SearchRequest) coordinatorContext.getSearchRequest();
+        if (FusionConfigResolver.resolvedPipelineHasScoreHybridizationProcessor(searchRequest)) {
+            return;
+        }
+        throw new IllegalArgumentException(
+            String.format(
+                Locale.ROOT,
+                "[%s] query [%s] requires a normalization or score-ranker processor: the resolved search pipeline (from "
+                    + "?search_pipeline= or index.search.default_pipeline) has none, so nothing would read the weights. "
+                    + "Attach one, or add [%s] to fuse without a pipeline",
+                NAME,
+                WEIGHTS_FIELD.getPreferredName(),
+                FUSION_FIELD.getPreferredName()
+            )
+        );
     }
 
     /**
@@ -661,6 +875,13 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         // ahead of everything else: it is the one case where the correct answer is to do no work at all.
         if (MatchSetRewriteContext.isMatchSetOnly(queryRewriteContext)) {
             return matchSetQuery();
+        }
+        // Being prepared as a leg of an enclosing fused query (FusedLegResolver brings the legs to their fixpoints ahead of
+        // the fan-out): stay as written. This hybrid runs as its own leg sub-search's request query, where its own rewrite
+        // resolves its legs and fans them out; taking the preparation for a request of its own would fan out here instead
+        // and self-erase before the enclosing fan-out fired. See LegPreparationRewriteContext.
+        if (LegPreparationRewriteContext.isPreparingLegs(queryRewriteContext)) {
+            return this;
         }
         // Round 2: the async self-erase already produced the standard query — swap to it (or stay put until it lands).
         if (Objects.nonNull(fusedSupplier)) {
@@ -711,8 +932,8 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         // class's explanation of why fused mode refuses cross-cluster search at all.
         CandidateScope candidateScope = CandidateScope.from(searchRequest);
 
-        FusionSpec fusionSpec = resolveFusionSpec(searchRequest);
-        if (Objects.isNull(fusionSpec)) {
+        FusionSpec baseFusionSpec = resolveFusionSpec(searchRequest);
+        if (Objects.isNull(baseFusionSpec)) {
             throw new IllegalArgumentException(
                 String.format(
                     Locale.ROOT,
@@ -734,7 +955,11 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         // Scope: the whole score-normalization family (min_max, z_score, l2) combined by any of the three means, plus
         // rank-based rrf. Which pairings are legal is NOT this set's business -- the classic compatibility matrix decides
         // that, and z_score x {geometric, harmonic} is the pairing it refuses.
-        requireSupportedTechniques(fusionSpec);
+        requireSupportedTechniques(baseFusionSpec);
+        // Request weights (`hybrid.weights`) go over whatever the block or the pipeline resolved — the techniques stay the
+        // base's. Everything below that fuses, validates or reports reads this spec; the one exception is the projection
+        // onto nested legs, which hands down the base (see projectResolvedConfigOntoLegs below).
+        FusionSpec fusionSpec = overlayRequestWeights(baseFusionSpec, weights);
 
         // Both ceilings a window has to fit under, resolved once: each leg fires size=window per shard, so a window above
         // index.max_result_window would fail in the legs (mirroring classic hybrid's pagination_depth ceiling), and the
@@ -797,9 +1022,19 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         // counted at parse time and includes everything refused in between.
         updateFusionTechniqueStats(fusionSpec);
 
-        // The Tail keeps the original legs (it is rewritten against the user's request, which still carries the
-        // pipeline), but the fanned-out legs run with the pipeline disabled — so hand the resolved config down.
-        List<QueryBuilder> fanOutLegs = projectResolvedConfigOntoLegs(legs, fusionSpec);
+        // The legs are resolved to their coordinator fixpoints inside the fan-out action below (FusedLegResolver), and the
+        // fan-out, the Tail and the count round all read the RESOLVED legs — so a `neural` leg's inference, like anything
+        // else a leg does asynchronously on the coordinator, happens once per request rather than once in the leg sub-search
+        // and again when the Tail that carries the leg verbatim is rewritten. What is decided here, before the resolution,
+        // reads the legs as written: the fast-path verdict below looks at names and inner_hits, both of which a rewrite
+        // carries over to the resolved builder (AbstractQueryBuilder#rewrite inherits _name and boost).
+        //
+        // The nested fused legs among them still need the resolved config handed down: the fanned-out legs run with the
+        // pipeline disabled, while the Tail is rewritten against the user's request, which still carries the pipeline. The
+        // BASE config, not the one carrying this query's request weights: a nested fused leg has its own number of
+        // sub-queries, so this query's weights are either the wrong count for it (a 400 in the leg's own rewrite) or, worse,
+        // the right count and the wrong values. Weights are per hybrid; a nested leg states its own, the same way it keeps
+        // its own pagination_depth. Projected onto the resolved legs, inside the action.
 
         // Last, and the only write-back to the request source: rescore is never propagated to a leg, so it runs on the shard
         // against the query this self-erases into — where the Tail's non-scoring matches are rescore candidates too, and a
@@ -916,179 +1151,184 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         FusedDocExplanations explanations = new FusedDocExplanations();
 
         SetOnce<QueryBuilder> fused = new SetOnce<>();
-        queryRewriteContext.registerAsyncAction((client, listener) -> {
-            // Built before the clock starts, and timed separately: registerAsyncAction defers this whole lambda, so a start
-            // taken outside it would fold core's own rewrite-loop scheduling into the fan-out wait.
-            long fanOutBuildStart = System.nanoTime();
-            MultiSearchRequest legSearches = HybridFusionOrchestrator.buildLegMultiSearch(candidateScope, fanOutLegs, window);
-            timings.fanOutBuildNanos(System.nanoTime() - fanOutBuildStart);
-            long fanOutStart = System.nanoTime();
-            client.multiSearch(legSearches, ActionListener.wrap(multiSearchResponse -> {
-                timings.fanOutWaitNanos(System.nanoTime() - fanOutStart);
-                // Fusion, given whatever the union count came to: the counted union when a lazy count-only round ran,
-                // else null. Everything after the legs lives here so that the count round — which is conditional, and
-                // whose answer fusion needs — can be awaited in between without the fusion being written twice.
-                CheckedConsumer<TotalHits, Exception> fuseAndFinish = countedUnion -> {
-                    // `this` goes onto the substitute as the query it replaced: core overwrites the request's source with
-                    // the rewritten query, so without it a response processor reading source().query() sees only the fused
-                    // window. Read in the response phase alone — see HybridFusionQueryBuilder#originalQuery().
-                    HybridFusionOrchestrator.FusedResult result = HybridFusionOrchestrator.buildFusedResult(
-                        searchRequest.source(),
-                        multiSearchResponse,
-                        legs,
-                        fusionSpec,
-                        window,
-                        timings,
-                        explanations,
-                        this,
-                        totalHitsConsumerForThisQuery,
-                        fastPathArmed,
-                        countedUnion
-                    );
-                    QueryBuilder fusedQuery = result.substitute();
-                    // The assembled page (or null: round 2 runs and its hits stand) goes to the filter's wrapper, which
-                    // swaps it in before anything else annotates the response's hits.
-                    if (Objects.nonNull(fusedHitsConsumer)) {
-                        fusedHitsConsumer.accept(result.assembledHits());
-                    }
-                    // Only round 2 can fill a page with Tail-only documents. An assembled page holds the ranked window
-                    // alone, and with nothing ranked round 2 is a match_none that returns no hits.
-                    if (Objects.nonNull(rankedPageConsumerForThisQuery) && fusedQuery instanceof HybridFusionQueryBuilder) {
-                        HybridFusionQueryBuilder rankedWindow = (HybridFusionQueryBuilder) fusedQuery;
-                        rankedPageConsumerForThisQuery.accept(rankedWindow.rankedIndices(), rankedWindow.rankedIds());
-                    }
-                    // Hand the now-known window to the placeholders installed above. Mutates nothing the request holds:
-                    // the placeholders are already in it, and core rewrites them into the window on its next pass.
-                    if (Objects.nonNull(rescoreScope)) {
-                        rescoreScope.resolve(fusedQuery);
-                    }
-                    fused.set(fusedQuery);
-                    // After the fused query is built, so the phases it measures are all closed. A leg failure throws above
-                    // and fails the request, so a published entry always describes a completed fusion.
-                    if (Objects.nonNull(fusionTimingConsumer)) {
-                        fusionTimingConsumer.accept(timings);
-                    }
-                    // Likewise published only once the window is final: what is described has to be what round 2 will rank.
-                    if (Objects.nonNull(fusedExplanationConsumer)) {
-                        fusedExplanationConsumer.accept(explanations);
-                    }
-                    listener.onResponse(null);
-                };
-                SearchRequest countRequest;
-                try {
-                    collectLegProfiles(multiSearchResponse);
-                    collectLegTimings(multiSearchResponse, timings);
-                    // Reported here rather than after the fusion, because this one does not describe the fusion: it says the
-                    // candidate set fusion was given is short, which is already settled and stays true however the fusion
-                    // goes. Publishing it before fusion runs also means it is on the record for a response only fusion's own
-                    // failure could prevent, and such a request fails outright.
-                    if (Objects.nonNull(legTimeoutConsumer)) {
-                        legTimeoutConsumer.accept(timings.anyLegTimedOut());
-                    }
-                    // The lazy union count: one size:0 round over the legs' disjunction, issued only for the shapes
-                    // HybridFusionOrchestrator#unionCountRequest accepts — every leg back exact and below the threshold,
-                    // the requested page inside what the legs ranked, and a count the window cannot supply.
-                    // Issued for an ARMED request only, which is what fastPathArmed gates. Armed, settling the total is
-                    // what lets round 2 be dropped outright, so one extra round buys a whole round back. Un-armed, round 2
-                    // runs whatever happens, so the count is a THIRD round doing work its Tail would have done inside
-                    // round 2 — and measured on WANDS with two lexical legs and `sort: [{_score: desc}]` (count-eligible,
-                    // fast-path-refused), keeping the Tail wins or ties: +5 ms cold to issue the count against +3 ms to
-                    // keep the Tail, level warm, identical hits.total, flat classic control. The count IS fully
-                    // request-cacheable, but a cache hit still costs the round trip, so caching brings it level rather
-                    // than ahead.
-                    // Beyond that gate leg shape is still not a filter: a lexical leg and an ANN leg that filled its
-                    // window are both re-executed by the Tail this replaces, so counting them costs no extra graph walk.
-                    // The one remaining per-leg refusal is a short `neural` leg, because re-executing it re-runs model
-                    // inference rather than a local graph walk — see that method for why.
-                    SearchRequest unionCountSearch = HybridFusionOrchestrator.unionCountRequest(
+        // What happens once every leg has answered: fusion over the legs' RESOLVED forms and their responses, the optional
+        // count round, and round 2's query. A local rather than the async action itself so that the action below can resolve
+        // and run the legs first (FusedLegResolver) and hand what came back here; the body is the fan-out's continuation as
+        // it has always been, reading the resolved legs wherever it used to read the legs as written, except for whether the
+        // Tail may materialize a leg, which is still read off the leg as written. The legs' responses arrive in the
+        // MultiSearchResponse shape the fan-out always produced, in leg order.
+        LegsRunConsumer onLegsRun = (resolvedLegs, multiSearchResponse, client, listener) -> {
+            // Fusion, given whatever the union count came to: the counted union when a lazy count-only round ran,
+            // else null. Everything after the legs lives here so that the count round — which is conditional, and
+            // whose answer fusion needs — can be awaited in between without the fusion being written twice.
+            CheckedConsumer<TotalHits, Exception> fuseAndFinish = countedUnion -> {
+                // `this` goes onto the substitute as the query it replaced: core overwrites the request's source with
+                // the rewritten query, so without it a response processor reading source().query() sees only the fused
+                // window. Read in the response phase alone — see HybridFusionQueryBuilder#originalQuery().
+                HybridFusionOrchestrator.FusedResult result = HybridFusionOrchestrator.buildFusedResult(
+                    searchRequest.source(),
+                    multiSearchResponse,
+                    legs,
+                    resolvedLegs,
+                    fusionSpec,
+                    window,
+                    timings,
+                    explanations,
+                    this,
+                    totalHitsConsumerForThisQuery,
+                    fastPathArmed,
+                    countedUnion
+                );
+                QueryBuilder fusedQuery = result.substitute();
+                // The assembled page (or null: round 2 runs and its hits stand) goes to the filter's wrapper, which
+                // swaps it in before anything else annotates the response's hits.
+                if (Objects.nonNull(fusedHitsConsumer)) {
+                    fusedHitsConsumer.accept(result.assembledHits());
+                }
+                // Only round 2 can fill a page with Tail-only documents. An assembled page holds the ranked window
+                // alone, and with nothing ranked round 2 is a match_none that returns no hits.
+                if (Objects.nonNull(rankedPageConsumerForThisQuery) && fusedQuery instanceof HybridFusionQueryBuilder) {
+                    HybridFusionQueryBuilder rankedWindow = (HybridFusionQueryBuilder) fusedQuery;
+                    rankedPageConsumerForThisQuery.accept(rankedWindow.rankedIndices(), rankedWindow.rankedIds());
+                }
+                // Hand the now-known window to the placeholders installed above. Mutates nothing the request holds:
+                // the placeholders are already in it, and core rewrites them into the window on its next pass.
+                if (Objects.nonNull(rescoreScope)) {
+                    rescoreScope.resolve(fusedQuery);
+                }
+                fused.set(fusedQuery);
+                // After the fused query is built, so the phases it measures are all closed. A leg failure throws above
+                // and fails the request, so a published entry always describes a completed fusion.
+                if (Objects.nonNull(fusionTimingConsumer)) {
+                    fusionTimingConsumer.accept(timings);
+                }
+                // Likewise published only once the window is final: what is described has to be what round 2 will rank.
+                if (Objects.nonNull(fusedExplanationConsumer)) {
+                    fusedExplanationConsumer.accept(explanations);
+                }
+                listener.onResponse(null);
+            };
+            SearchRequest countRequest;
+            try {
+                collectLegProfiles(multiSearchResponse);
+                collectLegTimings(multiSearchResponse, timings);
+                // Reported here rather than after the fusion, because this one does not describe the fusion: it says the
+                // candidate set fusion was given is short, which is already settled and stays true however the fusion
+                // goes. Publishing it before fusion runs also means it is on the record for a response only fusion's own
+                // failure could prevent, and such a request fails outright.
+                if (Objects.nonNull(legTimeoutConsumer)) {
+                    legTimeoutConsumer.accept(timings.anyLegTimedOut());
+                }
+                // The lazy union count: one size:0 round over the legs' disjunction, issued only for the shapes
+                // HybridFusionOrchestrator#unionCountRequest accepts — every leg back exact and below the threshold,
+                // the requested page inside what the legs ranked, and a count the window cannot supply.
+                // Issued for an ARMED request only, which is what fastPathArmed gates. Armed, settling the total is
+                // what lets round 2 be dropped outright, so one extra round buys a whole round back. Un-armed, round 2
+                // runs whatever happens, so the count is a THIRD round doing work its Tail would have done inside
+                // round 2 — and measured on WANDS with two lexical legs and `sort: [{_score: desc}]` (count-eligible,
+                // fast-path-refused), keeping the Tail wins or ties: +5 ms cold to issue the count against +3 ms to
+                // keep the Tail, level warm, identical hits.total, flat classic control. The count IS fully
+                // request-cacheable, but a cache hit still costs the round trip, so caching brings it level rather
+                // than ahead.
+                // Beyond that gate leg shape is still not a filter: a lexical leg and an ANN leg that filled its
+                // window are both re-executed by the Tail this replaces, so counting them costs no extra graph walk.
+                // The per-leg refusals for cost are a short `neural` leg that still carries its inference (a leg
+                // resolved here, a `neural_knn` with its vector, does not) and a leg that holds a fused hybrid, whose
+                // fan-out the count's own search would run again — see that method for why.
+                SearchRequest unionCountSearch = HybridFusionOrchestrator.unionCountRequest(
+                    candidateScope,
+                    searchRequest.source(),
+                    resolvedLegs,
+                    multiSearchResponse.getResponses(),
+                    window,
+                    fastPathArmed
+                );
+                if (Objects.isNull(unionCountSearch)) {
+                    recordWhetherTheTwinWouldHaveCounted(
+                        searchRequest,
                         candidateScope,
-                        searchRequest.source(),
-                        legs,
-                        multiSearchResponse.getResponses(),
+                        resolvedLegs,
+                        multiSearchResponse,
                         window,
-                        fastPathArmed
+                        fastPath
                     );
-                    if (Objects.isNull(unionCountSearch)) {
-                        recordWhetherTheTwinWouldHaveCounted(searchRequest, candidateScope, legs, multiSearchResponse, window, fastPath);
-                        fuseAndFinish.accept(null);
-                        return;
-                    }
-                    countRequest = unionCountSearch;
-                } catch (Exception e) {
-                    listener.onFailure(e);
+                    fuseAndFinish.accept(null);
                     return;
                 }
-                // Issued OUTSIDE the try above on purpose: that catch fails the request, and a throw from dispatching the
-                // count must not fail a request whose legs all succeeded — the count is an optimization, and the fallback a
-                // few lines down is to let round 2 count instead. Core routes this to onFailure in practice; this makes the
-                // contract hold even if it did not.
-                long unionCountStart = System.nanoTime();
-                try {
-                    client.search(countRequest, ActionListener.wrap(countResponse -> {
-                        timings.unionCountWaitNanos(System.nanoTime() - unionCountStart);
-                        try {
-                            // A count is only usable if it saw every shard and finished: a partial or truncated count
-                            // understates the union, and reporting an understated total is worse than keeping round 2,
-                            // which counts it itself. Null hands the request back to the Tail unchanged. The same
-                            // predicate is applied to the legs' own counts — see HybridFusionOrchestrator#answeredCompletely.
-                            boolean complete = HybridFusionOrchestrator.answeredCompletely(countResponse);
-                            fuseAndFinish.accept(complete ? countResponse.getHits().getTotalHits() : null);
-                        } catch (Exception e) {
-                            listener.onFailure(e);
-                        }
-                        // The count is an optimization, not a result the response needs: round 2 derives the same total
-                        // from its own Tail. So a failed count falls back to round 2 rather than failing a request whose
-                        // legs all succeeded — the response is the pre-L9 one, which is correct by construction.
-                    }, countFailure -> {
-                        timings.unionCountWaitNanos(System.nanoTime() - unionCountStart);
-                        log.debug("fused hybrid union count failed; keeping round 2 for totals", countFailure);
-                        try {
-                            fuseAndFinish.accept(null);
-                        } catch (Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }));
-                } catch (Exception dispatchFailure) {
-                    // Closed here too, so the span measures the attempt rather than reading as "no count was tried". A
-                    // synchronous dispatch throw is near-instant, so the value is small but not absent — which is the
-                    // difference a profile reader needs from a request where the gate refused and no round was issued.
+                countRequest = unionCountSearch;
+            } catch (Exception e) {
+                listener.onFailure(e);
+                return;
+            }
+            // Issued OUTSIDE the try above on purpose: that catch fails the request, and a throw from dispatching the
+            // count must not fail a request whose legs all succeeded — the count is an optimization, and the fallback a
+            // few lines down is to let round 2 count instead. Core routes this to onFailure in practice; this makes the
+            // contract hold even if it did not.
+            long unionCountStart = System.nanoTime();
+            try {
+                client.search(countRequest, ActionListener.wrap(countResponse -> {
                     timings.unionCountWaitNanos(System.nanoTime() - unionCountStart);
-                    log.debug("fused hybrid union count could not be dispatched; keeping round 2 for totals", dispatchFailure);
+                    try {
+                        // A count is only usable if it saw every shard and finished: a partial or truncated count
+                        // understates the union, and reporting an understated total is worse than keeping round 2,
+                        // which counts it itself. Null hands the request back to the Tail unchanged. The same
+                        // predicate is applied to the legs' own counts — see HybridFusionOrchestrator#answeredCompletely.
+                        boolean complete = HybridFusionOrchestrator.answeredCompletely(countResponse);
+                        fuseAndFinish.accept(complete ? countResponse.getHits().getTotalHits() : null);
+                    } catch (Exception e) {
+                        listener.onFailure(e);
+                    }
+                    // The count is an optimization, not a result the response needs: round 2 derives the same total
+                    // from its own Tail. So a failed count falls back to round 2 rather than failing a request whose
+                    // legs all succeeded — the response is the pre-L9 one, which is correct by construction.
+                }, countFailure -> {
+                    timings.unionCountWaitNanos(System.nanoTime() - unionCountStart);
+                    log.debug("fused hybrid union count failed; keeping round 2 for totals", countFailure);
                     try {
                         fuseAndFinish.accept(null);
                     } catch (Exception e) {
                         listener.onFailure(e);
                     }
+                }));
+            } catch (Exception dispatchFailure) {
+                // Closed here too, so the span measures the attempt rather than reading as "no count was tried". A
+                // synchronous dispatch throw is near-instant, so the value is small but not absent — which is the
+                // difference a profile reader needs from a request where the gate refused and no round was issued.
+                timings.unionCountWaitNanos(System.nanoTime() - unionCountStart);
+                log.debug("fused hybrid union count could not be dispatched; keeping round 2 for totals", dispatchFailure);
+                try {
+                    fuseAndFinish.accept(null);
+                } catch (Exception e) {
+                    listener.onFailure(e);
                 }
-                // Whole-MultiSearch transport failure (cancellation, rejection, coordinator error) — not a per-leg
-                // Item failure. Frame it as the user's hybrid/fused query rather than surfacing a bare multiSearch
-                // error, but keep the underlying status: a cancellation, a rejection and a coordinator bug are three
-                // different answers, and IllegalStateException collapses all of them to 500.
-            },
-                e -> listener.onFailure(
-                    new OpenSearchStatusException(
-                        String.format(
-                            Locale.ROOT,
-                            "[%s] query [%s] failed to execute fused-mode sub-queries: %s",
-                            NAME,
-                            FUSION_FIELD.getPreferredName(),
-                            e.getMessage()
-                        ),
-                        ExceptionsHelper.status(e),
-                        e
-                    )
-                )
-            ));
+            }
+        };
+        queryRewriteContext.registerAsyncAction((client, listener) -> {
+            // Each leg to the fixpoint its own coordinator rewrite would reach — a `neural` leg's vector resolved, a
+            // `neural_sparse` leg's tokens, a `terms` lookup fetched — and run the moment it is resolved, so a lexical leg
+            // runs while a `neural` sibling is still inferring, exactly as the legs overlapped when each resolved inside its
+            // own sub-search. Holding the RESOLVED builders is what lets the Tail and the count round reuse them instead of
+            // the user's originals, and so what makes a leg's inference happen once per request (see FusedLegResolver for
+            // the full account, and for the three fan-out spans it closes on `timings`). A leg's failure — to resolve or to
+            // run — is its item's failure in the responses, which groupLegHits reports with the leg's own status; only the
+            // machinery's own failure reaches the listener directly.
+            FusedLegResolver.resolveAndRun(
+                legs,
+                queryRewriteContext,
+                client,
+                candidateScope,
+                window,
+                leg -> projectResolvedConfigOntoLeg(leg, baseFusionSpec),
+                timings,
+                ActionListener.wrap(run -> onLegsRun.apply(run.resolvedLegs(), run.responses(), client, listener), listener::onFailure)
+            );
         });
 
         HybridQueryBuilder marker = new HybridQueryBuilder();
         for (QueryBuilder query : queries) {
             marker.add(query);
         }
-        marker.queryName(queryName);
-        marker.boost(boost);
-        marker.paginationDepth(paginationDepth);
-        marker.fusion(this.fusion);
+        copyRequestOptionsTo(marker);
         marker.resolvedFusionSpec = this.resolvedFusionSpec;
         marker.fusedSupplier = fused::get;
         marker.fusedRescoreScope = rescoreScope;
@@ -1143,8 +1383,8 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * <p>Answered by putting the same question to the same gate with {@code fastPathArmed = true} and discarding the
      * request it builds, which costs no round and cannot infer:
      * {@code HybridFusionOrchestrator#unionCountRequest} only builds — its one return is
-     * {@code CandidateScope#newUnionCountRequest}, which constructs and mutates no scope state — and a {@code neural}
-     * leg's second model call happens at rewrite, which only dispatching the request would reach. So this cannot cost the
+     * {@code CandidateScope#newUnionCountRequest}, which constructs and mutates no scope state — and whatever a leg
+     * would still resolve happens at rewrite, which only dispatching the request would reach. So this cannot cost the
      * inference that the per-leg refusal for a short {@code neural} leg exists to avoid.
      *
      * <p>Asked only where the answer can be read. That is the presence of {@code fusionTimingConsumer} — the channel this
@@ -1194,7 +1434,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * {@code bool{ should: [Top...], filter: Tail }} with no {@code minimum_should_match}, so its matches are its Tail's —
      * and the Tail is {@code bool{should: legs}}, the union of the legs. The scores differ (this loses them entirely), which
      * is exactly why this form is only ever used where scores are not read: inside the enclosing query's Tail
-     * {@code filter}. A doc that this bool matches while the real fused query would not (or the reverse) does not exist.
+     * {@code filter}. A doc that this bool matches while the real fused query would not (or the reverse) does not exist,
+     * with one exception: a radial k-NN leg handed over here is rewritten under the enclosing request and takes that
+     * request's size, while the fused query's own resolution sizes it at this hybrid's window ({@link FusedLegResolver});
+     * where k-NN reads that size, the two match sets can differ.
      *
      * <p>The legs are handed over as-is rather than rewritten here — the caller's rewrite loop keeps going. The one
      * exception is a leg that is itself a fused hybrid: it contributes <i>its</i> match set in this same pass, rather than
@@ -1336,6 +1579,11 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * than conservative — the shapes given up are the ones whose fan-out cannot be bounded, and each has the same body
      * written without that carrier as its remedy.
      *
+     * <p>A {@code wrapper} or {@code template} in a fused hybrid's leg is parsed on this coordinator before the leg
+     * sub-search runs ({@link FusedLegResolver}), which would put the hybrid it holds in that sub-search's own query, where
+     * this walk finds it. The resolver refuses a leg that declares more leg sub-searches resolved than as written, with this
+     * method's message ({@link #notPartOfRequestQueryMessage}).
+     *
      * <p>Inside the request's {@code query} this stays looser than what classic mode enforces shard-side
      * ({@code hybrid query must be a top level query and cannot be wrapped into other queries} —
      * {@code org.opensearch.neuralsearch.util.HybridQueryUtil}, which admits only the top level and the first clause of a
@@ -1347,22 +1595,28 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         if (Objects.nonNull(searchRequest.source()) && isReachableFrom(searchRequest.source().query())) {
             return;
         }
-        throw new IllegalArgumentException(
-            String.format(
-                Locale.ROOT,
-                "[%s] query [%s] must be part of the request's [query] and reachable within it, so that the leg "
-                    + "sub-searches it fans out can be counted. It is not: either it is in another position of the body "
-                    + "— [post_filter], an aggregation filter, a sort, [rescore] or a highlight query, none of which is "
-                    + "counted — in which case use a [bool] query with the same clauses as [should] there instead, which "
-                    + "matches what this [%s] matches but scores that disjunction rather than a fused combination; or it "
-                    + "is inside a query that carries its inner query without exposing it ([wrapper] carries it as bytes, "
-                    + "[template] as a map it parses in a later rewrite round), in which case write the [%s] directly "
-                    + "rather than through that query",
-                NAME,
-                FUSION_FIELD.getPreferredName(),
-                NAME,
-                NAME
-            )
+        throw new IllegalArgumentException(notPartOfRequestQueryMessage());
+    }
+
+    /**
+     * The message {@link #requireFusedQueryIsPartOfRequestQuery} refuses with. Package-private for {@link FusedLegResolver},
+     * which refuses with it a leg whose resolution brought out a fused hybrid.
+     */
+    static String notPartOfRequestQueryMessage() {
+        return String.format(
+            Locale.ROOT,
+            "[%s] query [%s] must be part of the request's [query] and reachable within it, so that the leg "
+                + "sub-searches it fans out can be counted. It is not: either it is in another position of the body "
+                + "— [post_filter], an aggregation filter, a sort, [rescore] or a highlight query, none of which is "
+                + "counted — in which case use a [bool] query with the same clauses as [should] there instead, which "
+                + "matches what this [%s] matches but scores that disjunction rather than a fused combination; or it "
+                + "is inside a query that carries its inner query without exposing it ([wrapper] carries it as bytes, "
+                + "[template] as a map it parses in a later rewrite round), in which case write the [%s] directly "
+                + "rather than through that query",
+            NAME,
+            FUSION_FIELD.getPreferredName(),
+            NAME,
+            NAME
         );
     }
 
@@ -1424,6 +1678,22 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     }
 
     /**
+     * The filter of a {@code neural_knn} query, or {@code null} when {@code queryBuilder} is not one or has none.
+     *
+     * <p>{@link NeuralKNNQueryBuilder} does not override {@link QueryBuilder#visit}, so a walk sees the builder and nothing
+     * below it, while the {@code neural} query it is rewritten from exposes the same filter as a child. A {@code neural} leg
+     * on a dense vector field runs in that rewritten form ({@link FusedLegResolver}), so a fused hybrid in its filter sits
+     * under a {@code neural_knn} in the leg sub-search. The fused walks read the filter through this and descend into it as
+     * into any other child. Public for {@code HybridQuerySearchRequestFilter}, which is in another package.
+     */
+    public static QueryBuilder neuralKnnFilter(final QueryBuilder queryBuilder) {
+        if (queryBuilder instanceof NeuralKNNQueryBuilder neuralKnnQueryBuilder) {
+            return neuralKnnQueryBuilder.getKnnQueryBuilder().getFilter();
+        }
+        return null;
+    }
+
+    /**
      * Looks for one exact query builder instance in a query tree.
      *
      * <p>The descent is this visitor's own: {@code accept} calls {@link QueryBuilder#visit} on whatever it is handed,
@@ -1431,8 +1701,9 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * not agree on descending. Five recurse — {@code bool}, {@code dis_max}, {@code constant_score}, {@code nested} and
      * {@code function_score} call {@code child.visit(subVisitor)} — while {@code boosting}, {@code script_score} and the
      * {@code span_*} builders hand their inner query to {@code accept} and stop there, and the builders that do not
-     * override {@code visit} expose nothing at all. Trusting them truncates the walk one level below the second group,
-     * which {@link #validateFusedLegSearchBudget} reads as an absence of legs rather than as an unknown: a chain of fused
+     * override {@code visit} expose nothing at all; of those, a {@code neural_knn}'s filter is read through
+     * {@link #neuralKnnFilter}. Trusting them truncates the walk one level below the second group, which
+     * {@link #validateFusedLegSearchBudget} reads as an absence of legs rather than as an unknown: a chain of fused
      * hybrids each written one level under a {@code boosting} counted {@code 2 x width} leg sub-searches at every depth,
      * was admitted on that number, and then served {@code width} per level — because each leg sub-search re-roots
      * this same walk at its own leg, where the next level is the root and trivially reachable. The ceiling held per
@@ -1460,6 +1731,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
             }
             found = found || queryBuilder == target;
             queryBuilder.visit(this);
+            QueryBuilder neuralKnnFilter = neuralKnnFilter(queryBuilder);
+            if (Objects.nonNull(neuralKnnFilter)) {
+                accept(neuralKnnFilter);
+            }
         }
 
         @Override
@@ -1488,10 +1763,13 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * out. Nesting is walked through {@link QueryBuilder#visit}, descended by {@link LegSearchCounter} itself so that a
      * builder which exposes a child without recursing into it cannot truncate the count one level below itself. That one
      * number can be read off the request's query alone is what {@link #requireFusedQueryIsPartOfRequestQuery} makes true:
-     * it refuses every fused hybrid this same walk cannot see — in another rewritten position of the body, or inside a
-     * query that carries its inner query without exposing it — so the count is exact rather than a lower bound, and each
-     * leg sub-search's own count of its own leg is a part of it rather than a fresh budget. That leaves total cost linear
-     * in the size of the body the user had to spell out, which is the property this guard exists to keep.
+     * it refuses a fused hybrid this same walk cannot see — in another rewritten position of the body, or inside a query
+     * that carries its inner query without exposing it. A {@code wrapper} or {@code template} in a leg is rewritten into
+     * the query it holds before that leg's sub-search runs ({@link FusedLegResolver}), where a hybrid it held is part of
+     * the sub-search's query; the resolver refuses a leg whose resolved form declares more leg sub-searches than the leg as
+     * written. So what fans out never exceeds the count, and each leg sub-search's own count of its own leg is a part of it
+     * rather than a fresh budget. That leaves total cost linear in the size of the body the user had to spell out, which is
+     * the property this guard exists to keep.
      */
     private static void validateFusedLegSearchBudget(final SearchRequest searchRequest) {
         if (Objects.isNull(searchRequest.source())) {
@@ -1548,9 +1826,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     /**
      * Counts the legs of every fused hybrid it is shown. One instance walks the whole tree — it hands itself back as the
      * child visitor and descends into each builder it is handed, so a nested fused hybrid is counted at every depth,
-     * including under a builder that exposes a child without recursing into it. Keyed by identity, so a builder is counted
-     * once however many ways the walk reaches it; a body parsed from a request has a distinct builder per clause, which is
-     * what makes that the same thing as counting what the user wrote.
+     * including under a builder that exposes a child without recursing into it, and in a {@code neural_knn}'s filter
+     * ({@link #neuralKnnFilter}). Keyed by identity, so a builder is counted once however many ways the walk reaches it;
+     * a body parsed from a request has a distinct builder per clause, which is what makes that the same thing as
+     * counting what the user wrote.
      */
     private static final class LegSearchCounter implements QueryBuilderVisitor {
         private final Set<QueryBuilder> entered = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -1565,6 +1844,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                 legSearches += ((HybridQueryBuilder) queryBuilder).queries().size();
             }
             queryBuilder.visit(this);
+            QueryBuilder neuralKnnFilter = neuralKnnFilter(queryBuilder);
+            if (Objects.nonNull(neuralKnnFilter)) {
+                accept(neuralKnnFilter);
+            }
         }
 
         @Override
@@ -1603,8 +1886,9 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     /**
      * Finds a hybrid query of the given mode at any depth, descending the way {@link LegSearchCounter} does: it hands
      * itself back as the child visitor and descends into each builder it is handed, keyed by identity. It also reads the
-     * query a {@code wrapper} or {@code template} query holds, without rewriting it. A query that a builder's own
-     * {@code visit} does not hand out, such as the filter of a {@code function_score} function, is not inspected.
+     * query a {@code wrapper} or {@code template} query holds, without rewriting it, and a {@code neural_knn}'s filter
+     * ({@link #neuralKnnFilter}). Any other query that a builder's own {@code visit} does not hand out, such as the filter
+     * of a {@code function_score} function, is not inspected.
      */
     private static final class NestedHybridModeFinder implements QueryBuilderVisitor {
         private final Set<QueryBuilder> entered = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -1632,6 +1916,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                 return;
             }
             queryBuilder.visit(this);
+            QueryBuilder neuralKnnFilter = neuralKnnFilter(queryBuilder);
+            if (Objects.nonNull(neuralKnnFilter)) {
+                accept(neuralKnnFilter);
+            }
         }
 
         @Override
@@ -1646,26 +1934,11 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         private void acceptHeldQuery(final QueryBuilder holder) {
             QueryBuilder heldQuery;
             try {
-                heldQuery = readHeldQuery(holder);
+                heldQuery = readHeldQuery(holder, rewriteContext);
             } catch (IOException | RuntimeException e) {
                 return;
             }
             accept(heldQuery);
-        }
-
-        private QueryBuilder readHeldQuery(final QueryBuilder holder) throws IOException {
-            if (holder instanceof TemplateQueryBuilder) {
-                // A template's own rewrite substitutes the request's variables and parses the result, without rewriting it.
-                return holder.rewrite(rewriteContext);
-            }
-            byte[] source = ((WrapperQueryBuilder) holder).source();
-            try (
-                XContentParser parser = MediaTypeRegistry.xContent(source)
-                    .xContent()
-                    .createParser(rewriteContext.getXContentRegistry(), LoggingDeprecationHandler.INSTANCE, source)
-            ) {
-                return parseInnerQueryBuilder(parser);
-            }
         }
     }
 
@@ -1692,10 +1965,91 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
     }
 
     /**
+     * The spec this query fuses by: the resolved base with top-level {@code hybrid.weights} laid over it, or the base
+     * itself when the query carries none. Field-level, deliberately: everything in the {@code fusion} block remains
+     * block-level, while weights are the one setting a caller tunes per request against techniques it configured once.
+     *
+     * <p>The long form ({@code fusion.combination.parameters.weights}) is already part of the resolved base; that both forms
+     * are never present together is {@link #requireValidWeights}' business, at parse and at the coordinator rewrite, so
+     * this is the merge alone.
+     */
+    static FusionSpec overlayRequestWeights(final FusionSpec base, final List<Float> weights) {
+        if (Objects.isNull(weights)) {
+            return base;
+        }
+        float[] perLeg = new float[weights.size()];
+        for (int i = 0; i < perLeg.length; i++) {
+            perLeg[i] = weights.get(i);
+        }
+        return base.withWeights(perLeg);
+    }
+
+    /** Whether the block carries {@code combination.parameters.weights} — the long form the shorthand must not meet. */
+    @SuppressWarnings("unchecked")
+    private static boolean hasLongFormWeights(final Map<String, Object> fusion) {
+        if (Objects.isNull(fusion) || (fusion.get(FUSION_KEY_COMBINATION) instanceof Map) == false) {
+            return false;
+        }
+        Object parameters = ((Map<String, Object>) fusion.get(FUSION_KEY_COMBINATION)).get(FUSION_KEY_PARAMETERS);
+        return parameters instanceof Map && ((Map<String, Object>) parameters).containsKey(WEIGHTS_KEY);
+    }
+
+    private static String weightsCarrierConflictMessage() {
+        return String.format(
+            Locale.ROOT,
+            "[%s] query cannot combine [%s] with [%s.%s.%s.%s]: state the weights once",
+            NAME,
+            WEIGHTS_FIELD.getPreferredName(),
+            FUSION_FIELD.getPreferredName(),
+            FUSION_KEY_COMBINATION,
+            FUSION_KEY_PARAMETERS,
+            WEIGHTS_KEY
+        );
+    }
+
+    /** {@code [hybrid] query [weights] <reason>} — the subject every refusal of the shorthand shares. */
+    private static String weightsMessage(final String reason) {
+        return String.format(Locale.ROOT, "[%s] query [%s] %s", NAME, WEIGHTS_FIELD.getPreferredName(), reason);
+    }
+
+    /**
+     * The one statement of the {@code weights} rule: a non-empty list of numbers, one per sub-query, not alongside the long
+     * form ({@code fusion.combination.parameters.weights}), each in {@code [0, 1]} and summing to {@code 1}. Returns the
+     * weights as the builder carries them. Thrown as {@link IllegalArgumentException}; {@link #fromXContent} wraps that in a
+     * {@link ParsingException} at the field's location, and {@link #doRewrite} lets it stand for a builder assembled in
+     * code. The reasons are shared with {@link FusionSpec#weightsFromList}, so the long form and the shorthand read the
+     * same.
+     */
+    static List<Float> requireValidWeights(final List<?> weights, final int legCount, final Map<String, Object> fusion) {
+        if (hasLongFormWeights(fusion)) {
+            throw new IllegalArgumentException(weightsCarrierConflictMessage());
+        }
+        if (weights.stream().anyMatch(weight -> (weight instanceof Number) == false)) {
+            throw new IllegalArgumentException(weightsMessage(FusionSpec.WEIGHTS_MUST_BE_NUMBERS));
+        }
+        if (weights.isEmpty()) {
+            throw new IllegalArgumentException(weightsMessage(FusionSpec.WEIGHTS_MUST_NOT_BE_EMPTY));
+        }
+        if (weights.size() != legCount) {
+            throw new IllegalArgumentException(
+                weightsMessage(
+                    String.format(Locale.ROOT, "number of weights [%d] must match number of sub-queries [%d]", weights.size(), legCount)
+                )
+            );
+        }
+        List<Float> parsed = new ArrayList<>(weights.size());
+        for (Object weight : weights) {
+            parsed.add(((Number) weight).floatValue());
+        }
+        SCORE_COMBINATION_UTIL.validateWeights(parsed);
+        return Collections.unmodifiableList(parsed);
+    }
+
+    /**
      * Hand the already-resolved fusion config down to any leg that is itself a fused hybrid delegating to the pipeline.
      *
      * <p>Legs are fanned out with {@code pipeline=_none} so that per-leg request/response processors do not run
-     * ({@link HybridFusionOrchestrator#buildLegMultiSearch}); a nested fused hybrid would therefore resolve no config
+     * ({@link CandidateScope#newLegRequest}); a nested fused hybrid would therefore resolve no config
      * from its own leg request and fail with a message blaming a pipeline the user has correctly configured. Projecting
      * the enclosing config is faithful: resolving from the pipeline is exactly what the nested query would have done,
      * and it is the same request and therefore the same pipeline.
@@ -1711,19 +2065,37 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         List<QueryBuilder> projected = null;
         for (int i = 0; i < legs.size(); i++) {
             QueryBuilder leg = legs.get(i);
-            if ((leg instanceof HybridQueryBuilder) == false) {
-                continue;
-            }
-            HybridQueryBuilder nested = (HybridQueryBuilder) leg;
-            if (Objects.isNull(nested.fusion) || hasInlineConfig(nested.fusion)) {
+            QueryBuilder projectedLeg = projectResolvedConfigOntoLeg(leg, resolved);
+            if (projectedLeg == leg) {
                 continue;
             }
             if (Objects.isNull(projected)) {
                 projected = new ArrayList<>(legs);
             }
-            projected.set(i, nested.withResolvedFusionSpec(resolved));
+            projected.set(i, projectedLeg);
         }
         return Objects.isNull(projected) ? legs : projected;
+    }
+
+    /** As {@link #projectResolvedConfigOntoLegs} for one leg: the leg itself unless it is a fused hybrid delegating to the pipeline. */
+    static QueryBuilder projectResolvedConfigOntoLeg(final QueryBuilder leg, final FusionSpec resolved) {
+        if ((leg instanceof HybridQueryBuilder) == false) {
+            return leg;
+        }
+        HybridQueryBuilder nested = (HybridQueryBuilder) leg;
+        if (Objects.isNull(nested.fusion) || hasInlineConfig(nested.fusion)) {
+            return leg;
+        }
+        return nested.withResolvedFusionSpec(resolved);
+    }
+
+    /**
+     * The fan-out's continuation ({@link #doRewriteFused}): fusion and round-2 assembly over the legs' resolved forms and
+     * their responses, with the client the count round may need and core's listener for the async action.
+     */
+    @FunctionalInterface
+    private interface LegsRunConsumer {
+        void apply(List<QueryBuilder> resolvedLegs, MultiSearchResponse responses, Client client, ActionListener<?> listener);
     }
 
     /**
@@ -1736,11 +2108,10 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         for (QueryBuilder query : queries) {
             copy.add(query);
         }
-        copy.queryName(queryName);
-        copy.boost(boost);
-        // The nested hybrid's own depth, never the enclosing one's: it sizes this copy's window when it names no window_size.
-        copy.paginationDepth(paginationDepth);
-        copy.fusion(fusion);
+        // The nested hybrid's own depth, weights and block, never the enclosing one's.
+        copyRequestOptionsTo(copy);
+        // This copy becomes the top-level query of a leg sub-search, whose own coordinator rewrite validates it.
+        copy.requestOptionsAccepted = false;
         copy.resolvedFusionSpec = resolved;
         // Neither profiling consumer is copied. This copy is a leg of an enclosing fused hybrid, and a leg sub-search
         // re-enters the ActionFilter, which attaches consumers of its own — carrying these over would publish the same
@@ -1752,10 +2123,11 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * True when the {@code fusion} block configures the fusion itself rather than delegating to the attached pipeline.
      *
      * <p>Keys on the absence of {@code source: pipeline}, not on the presence of a technique key: a block that names
-     * neither a technique nor a source ({@code fusion: {}}, {@code fusion: {"window_size": N}}) is the built-in-defaults
-     * form, and {@link FusionSpec#fromInlineFusion} fills in min_max + arithmetic_mean with equal weights. Reading the
-     * pipeline instead would depend on request context the query body does not show — which pipeline the request or the
-     * index happens to attach — so it is only ever done when the body asks for it.
+     * neither a technique nor a source ({@code fusion: {}} or {@code fusion: {"window_size": N}}) is the
+     * built-in-defaults form, and {@link FusionSpec#fromInlineFusion} fills in min_max + arithmetic_mean. Top-level
+     * {@code hybrid.weights}, when present, is overlaid after this base is resolved. Reading the pipeline instead would
+     * depend on request context the query body does not show — which pipeline the request or the index happens to
+     * attach — so it is only ever done when the body asks for it.
      */
     private static boolean hasInlineConfig(final Map<String, Object> fusion) {
         return fusion.containsKey(FUSION_KEY_SOURCE) == false;
@@ -2037,6 +2409,7 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
         EqualsBuilder equalsBuilder = new EqualsBuilder();
         equalsBuilder.append(queries, obj.queries);
         equalsBuilder.append(paginationDepth, obj.paginationDepth);
+        equalsBuilder.append(weights, obj.weights);
         equalsBuilder.append(fusion, obj.fusion);
         return equalsBuilder.isEquals();
     }
@@ -2047,7 +2420,7 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      */
     @Override
     protected int doHashCode() {
-        return Objects.hash(queries, paginationDepth, fusion);
+        return Objects.hash(queries, paginationDepth, weights, fusion);
     }
 
     /**
@@ -2099,16 +2472,9 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
      * </ul>
      */
     private static void validateFusion(final Map<String, Object> fusion, final Integer paginationDepth, final XContentParser parser) {
-        for (String key : fusion.keySet()) {
-            if (FUSION_KEY_SOURCE.equals(key) == false
-                && FUSION_KEY_NORMALIZATION.equals(key) == false
-                && FUSION_KEY_COMBINATION.equals(key) == false
-                && FUSION_KEY_WINDOW_SIZE.equals(key) == false) {
-                throw new ParsingException(
-                    parser.getTokenLocation(),
-                    String.format(Locale.ROOT, "[%s] query [%s] contains unknown key [%s]", NAME, FUSION_FIELD.getPreferredName(), key)
-                );
-            }
+        String unknownKey = firstUnknownFusionKey(fusion);
+        if (Objects.nonNull(unknownKey)) {
+            throw new ParsingException(parser.getTokenLocation(), unknownFusionKeyMessage(unknownKey));
         }
 
         Object source = fusion.get(FUSION_KEY_SOURCE);
@@ -2195,6 +2561,27 @@ public final class HybridQueryBuilder extends AbstractQueryBuilder<HybridQueryBu
                 String.format(Locale.ROOT, "[%s] query [%s] must be greater than 0", NAME, PAGINATION_DEPTH_FIELD.getPreferredName())
             );
         }
+    }
+
+    /**
+     * The first key of a {@code fusion} block that is not one of the four it may carry ({@code source},
+     * {@code normalization}, {@code combination}, {@code window_size}), or null. Asked at parse for the request body and
+     * at the coordinator rewrite for a builder assembled in code — one list of keys for both.
+     */
+    private static String firstUnknownFusionKey(final Map<String, Object> fusion) {
+        for (String key : fusion.keySet()) {
+            if (FUSION_KEY_SOURCE.equals(key) == false
+                && FUSION_KEY_NORMALIZATION.equals(key) == false
+                && FUSION_KEY_COMBINATION.equals(key) == false
+                && FUSION_KEY_WINDOW_SIZE.equals(key) == false) {
+                return key;
+            }
+        }
+        return null;
+    }
+
+    private static String unknownFusionKeyMessage(final String key) {
+        return String.format(Locale.ROOT, "[%s] query [%s] contains unknown key [%s]", NAME, FUSION_FIELD.getPreferredName(), key);
     }
 
     private static void validatePaginationDepth(final Integer paginationDepth, final QueryShardContext queryShardContext) {
