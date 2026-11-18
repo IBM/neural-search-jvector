@@ -4,6 +4,8 @@
  */
 package org.opensearch.neuralsearch.search.collector;
 
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.search.LeafCollector;
 import org.opensearch.neuralsearch.query.HybridSubQueryScorer;
 import org.opensearch.neuralsearch.query.OpenSearchQueryTestCase;
@@ -15,6 +17,24 @@ import java.util.List;
  * Base class for HybridCollector test cases
  */
 public class HybridCollectorTestCase extends OpenSearchQueryTestCase {
+    /**
+     * Index writer config that keeps insertion order on merge. newIndexWriterConfig() can pick
+     * MockRandomMergePolicy, which may reverse doc order on forceMerge; LogMergePolicy merges
+     * adjacent segments only. Not for tests that assert leaves().size() > 1; use
+     * {@link #multiSegmentIndexWriterConfig()}.
+     */
+    protected static IndexWriterConfig orderPreservingIndexWriterConfig() {
+        return newIndexWriterConfig().setMergePolicy(newLogMergePolicy());
+    }
+
+    /**
+     * Index writer config that never merges, so each flush stays a separate segment. For tests
+     * that assert leaves().size() > 1.
+     */
+    protected static IndexWriterConfig multiSegmentIndexWriterConfig() {
+        return newIndexWriterConfig().setMergePolicy(NoMergePolicy.INSTANCE);
+    }
+
     /**
      * Collect docs and scores for each sub-query scorer and add them to the leaf collector
      * @param scorer HybridSubQueryScorer object
