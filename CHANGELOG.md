@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * [Hybrid Query] Accept top-level `weights` in classic and fused hybrid query modes ([#2065](https://github.com/opensearch-project/neural-search/pull/2065))
 
 ### Bug Fixes
+* [Hybrid Query] Fix concurrent segment search changing hybrid query results: each shard now keeps at most `pagination_depth` (or `size`) hits per sub-query. Score-ordered, field-sorted and default-mode `collapse` results no longer depend on the segment layout, `rescore` runs once per shard, single-shard requests fetch only the kept hits, and pages beyond `pagination_depth` return "Reached end of result"; distinct-groups collapse not affected ([#2093](https://github.com/opensearch-project/neural-search/pull/2093))
+* [Hybrid Query] Fix concurrent sorted hybrid queries returning wrong documents or failing with runtime exception ([#2089](https://github.com/opensearch-project/neural-search/pull/2089))
+* [SemanticHighlighter] Find `inner_hits` semantic highlight targets below a `boosting` or `script_score` query that wraps a compound query (for example `boosting > bool > nested`), which batch semantic highlighting silently skipped since 3.9.0 ([#2083](https://github.com/opensearch-project/neural-search/issues/2083))
 * [Hybrid Query] Run a fused hybrid query's sub-query inference once per request, special optimization logic for `neural_sparse` sub-query, or a `nested` sub-query over a k-NN or sparse ([#2074](https://github.com/opensearch-project/neural-search/pull/2074))
 * [Hybrid Query] Reject an unknown `combination.parameters` and an unknown keys on an inline `fusion` clause ([#2069](https://github.com/opensearch-project/neural-search/pull/2069))
 * [Hybrid Query] Reject non-numeric score-combination `weights` with a `400` validation error instead of failing with a `ClassCastException` that surfaced as an internal `500` error ([#2067](https://github.com/opensearch-project/neural-search/pull/2067))
@@ -33,10 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * [Agentic Search] Keep the `agent_steps_summary` returned in a conversational agent's final output, which was dropped for OpenAI native function calling ([#2071](https://github.com/opensearch-project/neural-search/pull/2071))
 * [Semantic Field] Stop logging the full ingest document on chunking or model-info failure; log only the document `_id` and `_index` so customer content is no longer written to service logs ([#2057](https://github.com/opensearch-project/neural-search/pull/2057))
 * [Sparse ANN] Fix documents with token ids at or above 32768 never matching: approximate search on the Lucene engine returned the documents of the id modulo 32768 instead (e.g. 0 for 32768), and the native engine never matched ids from 32768 to 65535 and failed the shard on an id above 65535. The native engine now folds ids modulo 65536, so ids up to 65535 match exactly ([#2059](https://github.com/opensearch-project/neural-search/pull/2059))
+* [Hybrid Query] Fix inaccurate hits.total.value on hybrid queries with a small size, caused by top-k heap eviction feeding min-competitive-score pruning before track_total_hits' threshold was reached ([opensearch-project/OpenSearch#22823](https://github.com/opensearch-project/OpenSearch/issues/22823))
 
 ### Infrastructure
 * Fetch test models from commit-pinned `raw.githubusercontent.com` URLs, fix ITs for secure cluster ([#2070](https://github.com/opensearch-project/neural-search/pull/2070))
 * Fix explain ITs failing on Lucene 10.6, which rewords the k-NN match explanation to `Within top N doc(s)`; assert the shape of that leaf, not Lucene's exact text ([#2077](https://github.com/opensearch-project/neural-search/pull/2077))
+* Fix flaky hybrid collapse collector tests by keeping insertion order when the test index is force-merged ([#2075](https://github.com/opensearch-project/neural-search/issues/2075))
+* Add a multi-segment index writer helper to the hybrid collapse collector tests ([#2095](https://github.com/opensearch-project/neural-search/pull/2095))
 
 ### Documentation
 
