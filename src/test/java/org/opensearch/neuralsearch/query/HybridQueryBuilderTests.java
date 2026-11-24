@@ -158,7 +158,7 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
         QueryShardContext mockQueryShardContext = mock(QueryShardContext.class);
         KNNVectorFieldType mockKNNVectorField = mock(KNNVectorFieldType.class);
         KNNMappingConfig mockKNNMappingConfig = mock(KNNMappingConfig.class);
-        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.FAISS, SpaceType.L2, MethodComponentContext.EMPTY);
+        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.JVECTOR, SpaceType.L2, MethodComponentContext.EMPTY);
         when(mockKNNVectorField.getKnnMappingConfig()).thenReturn(mockKNNMappingConfig);
         when(mockKNNMappingConfig.getKnnMethodContext()).thenReturn(Optional.of(knnMethodContext));
         when(mockQueryShardContext.index()).thenReturn(dummyIndex);
@@ -198,7 +198,7 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
         QueryShardContext mockQueryShardContext = mock(QueryShardContext.class);
         KNNVectorFieldType mockKNNVectorField = mock(KNNVectorFieldType.class);
         KNNMappingConfig mockKNNMappingConfig = mock(KNNMappingConfig.class);
-        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.FAISS, SpaceType.L2, MethodComponentContext.EMPTY);
+        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.JVECTOR, SpaceType.L2, MethodComponentContext.EMPTY);
         when(mockKNNVectorField.getKnnMappingConfig()).thenReturn(mockKNNMappingConfig);
         when(mockKNNMappingConfig.getKnnMethodContext()).thenReturn(Optional.of(knnMethodContext));
         when(mockQueryShardContext.index()).thenReturn(dummyIndex);
@@ -253,7 +253,7 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
         QueryShardContext mockQueryShardContext = mock(QueryShardContext.class);
         KNNVectorFieldType mockKNNVectorField = mock(KNNVectorFieldType.class);
         KNNMappingConfig mockKNNMappingConfig = mock(KNNMappingConfig.class);
-        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.FAISS, SpaceType.L2, MethodComponentContext.EMPTY);
+        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.JVECTOR, SpaceType.L2, MethodComponentContext.EMPTY);
         when(mockKNNVectorField.getKnnMappingConfig()).thenReturn(mockKNNMappingConfig);
         when(mockKNNMappingConfig.getKnnMethodContext()).thenReturn(Optional.of(knnMethodContext));
         when(mockQueryShardContext.index()).thenReturn(dummyIndex);
@@ -293,7 +293,7 @@ public class HybridQueryBuilderTests extends OpenSearchQueryTestCase {
         QueryShardContext mockQueryShardContext = mock(QueryShardContext.class);
         KNNVectorFieldType mockKNNVectorField = mock(KNNVectorFieldType.class);
         KNNMappingConfig mockKNNMappingConfig = mock(KNNMappingConfig.class);
-        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.FAISS, SpaceType.L2, MethodComponentContext.EMPTY);
+        KNNMethodContext knnMethodContext = new KNNMethodContext(KNNEngine.JVECTOR, SpaceType.L2, MethodComponentContext.EMPTY);
         when(mockKNNVectorField.getKnnMappingConfig()).thenReturn(mockKNNMappingConfig);
         when(mockKNNMappingConfig.getKnnMethodContext()).thenReturn(Optional.of(knnMethodContext));
         when(mockQueryShardContext.index()).thenReturn(dummyIndex);

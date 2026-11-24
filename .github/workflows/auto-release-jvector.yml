@@ -1,0 +1,88 @@
+name: Releases (JVector)
+
+# Automates the manual release steps:
+#   1. Tag (x.x.x.x) is pushed from the release branch
+#   2. ./gradlew assemble -Dopensearch.version=x.x.x -Dbuild.snapshot=false
+#   3. Upload the plugin ZIP to the release for that tag
+#
+# Uses only GitHub-owned actions, the preinstalled gh CLI and the built-in
+# GITHUB_TOKEN, so it needs no GitHub App, APP_ID or APP_PRIVATE_KEY secrets.
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # jni/external/neural-sparse-cpp is a submodule the native build needs
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: 'gradle'
+
+      # build.gradle appends ".0" itself, so Gradle needs 3.9.0 for tag 3.9.0.0
+      - name: Get OpenSearch version from tag
+        id: version
+        run: echo "opensearch_version=${TAG%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble plugin ZIP
+        run: ./gradlew assemble -Dopensearch.version=${{ steps.version.outputs.opensearch_version }} -Dbuild.snapshot=false
+
+      - name: Create release and upload ZIP
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES="release-notes/opensearch-neural-search.release-notes-${TAG}.md"
+          NOTES_ARGS=(--generate-notes)
+          if [ -f "$NOTES" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES")
+          fi
+
+          shopt -s nullglob
+          ZIPS=(build/distributions/*.zip)
+          if [ ${#ZIPS[@]} -eq 0 ]; then
+            echo "No ZIP found in build/distributions" >&2
+            exit 1
+          fi
+
+          # Retry on transient GitHub API errors (e.g. 504 Gateway Timeout)
+          MAX_RETRIES=3
+          retry() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$MAX_RETRIES" ]; then
+                echo "Failed after $MAX_RETRIES attempts: $*" >&2
+                return 1
+              fi
+              echo "GitHub API failed. Retrying in 15 seconds... ($attempt/$MAX_RETRIES)"
+              sleep 15
+              attempt=$((attempt + 1))
+            done
+          }
+
+          # Create the release without files, then upload separately. gh creates a
+          # draft when files are attached to `release create`; a failed upload would
+          # leave a draft that `release view` cannot see, and a retry would duplicate it.
+          ensure_release() {
+            # Skip if it exists (created manually or by an earlier attempt)
+            gh release view "$TAG" >/dev/null 2>&1 && return 0
+            # --verify-tag: fail instead of creating a new tag from the default branch
+            gh release create "$TAG" --title "$TAG" --verify-tag "${NOTES_ARGS[@]}"
+          }
+
+          retry ensure_release
+          retry gh release upload "$TAG" "${ZIPS[@]}" --clobber
