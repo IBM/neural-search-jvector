@@ -17,7 +17,7 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'neural-search'
+rootProject.name = 'neural-search-jvector'
 
 include ":qa"
 include ":qa:rolling-upgrade"

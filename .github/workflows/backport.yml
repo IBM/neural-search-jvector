@@ -4,6 +4,10 @@ on:
   pull_request_target:
     types: [closed, labeled]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   backport:
     if: github.repository == 'opensearch-project/neural-search'
